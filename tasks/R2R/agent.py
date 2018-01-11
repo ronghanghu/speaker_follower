@@ -27,7 +27,7 @@ class BaseAgent(object):
         self.losses = [] # For learning agents
     
     def write_results(self):
-        output = [{'instr_id':k, 'trajectory': v} for k,v in self.results.iteritems()]
+        output = [{'instr_id':k, 'trajectory': v} for k,v in self.results.items()]
         with open(self.results_path, 'w') as f:
             json.dump(output, f)
 
@@ -77,7 +77,7 @@ class RandomAgent(BaseAgent):
             'instr_id': ob['instr_id'],
             'path': [(ob['viewpoint'], ob['heading'], ob['elevation'])]
         } for ob in obs]
-        self.steps = random.sample(range(-11,1), len(obs))
+        self.steps = random.sample(list(range(-11,1)), len(obs))
         ended = [False] * len(obs)
         for t in range(30):
             actions = []

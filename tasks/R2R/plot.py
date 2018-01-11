@@ -95,16 +95,16 @@ def plot_final_scores():
             score_summary,scores = ev.score(outfile % split)
             if i == 0:
                 method = 'Teacher-forcing'
-                ax.hist(scores['nav_errors'], bins=range(0,30,3), label=method, normed=True, histtype = 'step', linewidth=2.5, color='C1')
+                ax.hist(scores['nav_errors'], bins=list(range(0,30,3)), label=method, normed=True, histtype = 'step', linewidth=2.5, color='C1')
             elif i == 1:
                 method = 'Student-forcing'
-                ax.hist(scores['nav_errors'], bins=range(0,30,3), label=method, alpha=0.7, normed=True, color='C0')
+                ax.hist(scores['nav_errors'], bins=list(range(0,30,3)), label=method, alpha=0.7, normed=True, color='C0')
             elif i == 2:
                 method = 'Start locations'
-                ax.hist(scores['nav_errors'], bins=range(0,30,3), label=method, normed=True, histtype = 'step', linewidth=2.5, color='C3')
+                ax.hist(scores['nav_errors'], bins=list(range(0,30,3)), label=method, normed=True, histtype = 'step', linewidth=2.5, color='C3')
             elif i == 3:
                 method = 'Random agent'
-                ax.hist(scores['nav_errors'], bins=range(0,30,3), label=method, normed=True, histtype = 'step', linewidth=2.5, color='C2')
+                ax.hist(scores['nav_errors'], bins=list(range(0,30,3)), label=method, normed=True, histtype = 'step', linewidth=2.5, color='C2')
     ax.set_title('Val Seen Navigation Error')
     ax.set_xlabel('Error (m)')
     ax.set_ylabel('Frequency')

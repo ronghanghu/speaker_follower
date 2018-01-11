@@ -46,7 +46,7 @@ def train(train_env, encoder, decoder, n_iters, log_every=100, val_envs={}):
     ''' Train on training set, validating on both seen and unseen. '''
 
     agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
-    print 'Training with %s feedback' % feedback_method
+    print('Training with %s feedback' % feedback_method)
     encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
     decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate, weight_decay=weight_decay) 
 
@@ -68,7 +68,7 @@ def train(train_env, encoder, decoder, n_iters, log_every=100, val_envs={}):
         loss_str = 'train loss: %.4f' % train_loss_avg
 
         # Run validation
-        for env_name, (env, evaluator) in val_envs.iteritems():
+        for env_name, (env, evaluator) in val_envs.items():
             agent.env = env
             agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, model_prefix, env_name, iter)
             # Get validation loss under the same conditions as training
@@ -81,15 +81,15 @@ def train(train_env, encoder, decoder, n_iters, log_every=100, val_envs={}):
             agent.write_results()
             score_summary, _ = evaluator.score(agent.results_path)
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
-            for metric,val in score_summary.iteritems():
+            for metric,val in score_summary.items():
                 data_log['%s %s' % (env_name,metric)].append(val)
                 if metric in ['success_rate']:
                     loss_str += ', %s: %.3f' % (metric, val)
 
         agent.env = train_env
 
-        print('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
-                                             iter, float(iter)/n_iters*100, loss_str))
+        print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
+                                             iter, float(iter)/n_iters*100, loss_str)))
 
         df = pd.DataFrame(data_log)
         df.set_index('iteration')

@@ -22,20 +22,20 @@ class EnvBatch():
 
     def __init__(self, feature_store=None, batch_size=100):
         if feature_store:
-            print 'Loading image features from %s' % feature_store
+            print('Loading image features from %s' % feature_store)
             tsv_fieldnames = ['scanId', 'viewpointId', 'image_w','image_h', 'vfov', 'features']
             self.features = {}
-            with open(feature_store, "r+b") as tsv_in_file:
+            with open(feature_store, "rt") as tsv_in_file:
                 reader = csv.DictReader(tsv_in_file, delimiter='\t', fieldnames = tsv_fieldnames)
                 for item in reader:
                     self.image_h = int(item['image_h'])
                     self.image_w = int(item['image_w'])
                     self.vfov = int(item['vfov'])
                     long_id = self._make_id(item['scanId'], item['viewpointId'])
-                    self.features[long_id] = np.frombuffer(base64.decodestring(item['features']), 
+                    self.features[long_id] = np.frombuffer(base64.decodebytes(bytearray(item['features'], 'utf-8')),
                             dtype=np.float32).reshape((36, 2048))
         else:
-            print 'Image features not provided'
+            print('Image features not provided')
             self.features = None
             self.image_w = 640
             self.image_h = 480
@@ -122,17 +122,17 @@ class R2RBatch():
         self.ix = 0
         self.batch_size = batch_size
         self._load_nav_graphs()
-        print 'R2RBatch loaded with %d instructions, using splits: %s' % (len(self.data), ",".join(splits))
+        print('R2RBatch loaded with %d instructions, using splits: %s' % (len(self.data), ",".join(splits)))
 
     def _load_nav_graphs(self):
         ''' Load connectivity graph for each scan, useful for reasoning about shortest paths '''
-        print 'Loading navigation graphs for %d scans' % len(self.scans)
+        print('Loading navigation graphs for %d scans' % len(self.scans))
         self.graphs = load_nav_graphs(self.scans)
         self.paths = {}
-        for scan,G in self.graphs.iteritems(): # compute all shortest paths
+        for scan,G in self.graphs.items(): # compute all shortest paths
             self.paths[scan] = dict(nx.all_pairs_dijkstra_path(G))
         self.distances = {}
-        for scan,G in self.graphs.iteritems(): # compute all shortest paths
+        for scan,G in self.graphs.items(): # compute all shortest paths
             self.distances[scan] = dict(nx.all_pairs_dijkstra_path_length(G))
 
     def _next_minibatch(self):

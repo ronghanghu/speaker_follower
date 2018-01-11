@@ -31,7 +31,7 @@ class Evaluation(object):
         self.instr_ids = set(self.instr_ids)
         self.graphs = load_nav_graphs(self.scans)
         self.distances = {}
-        for scan,G in self.graphs.iteritems(): # compute all shortest paths
+        for scan,G in self.graphs.items(): # compute all shortest paths
             self.distances[scan] = dict(nx.all_pairs_dijkstra_path_length(G))
 
     def _get_nearest(self, scan, goal_id, path):
@@ -103,7 +103,7 @@ def eval_simple_agents():
             agent.test()
             agent.write_results()
             score_summary, _ = ev.score(outfile)
-            print '\n%s' % agent_type
+            print('\n%s' % agent_type)
             pp.pprint(score_summary)
 
 
@@ -117,7 +117,7 @@ def eval_seq2seq():
         for split in ['val_seen', 'val_unseen']:
             ev = Evaluation([split])
             score_summary, _ = ev.score(outfile % split)
-            print '\n%s' % outfile
+            print('\n%s' % outfile)
             pp.pprint(score_summary)
 
 

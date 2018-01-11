@@ -118,7 +118,7 @@ def build_vocab(splits=['train'], min_count=5, start_vocab=base_vocab):
 
 
 def write_vocab(vocab, path):
-    print 'Writing vocab of size %d to %s' % (len(vocab),path)
+    print('Writing vocab of size %d to %s' % (len(vocab),path))
     with open(path, 'w') as f:
         for word in vocab:
             f.write("%s\n" % word)
