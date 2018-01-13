@@ -23,9 +23,9 @@ class BaseAgent(object):
         self.env = env
         self.results_path = results_path
         random.seed(1)
-        self.results = {} 
+        self.results = {}
         self.losses = [] # For learning agents
-    
+
     def write_results(self):
         output = [{'instr_id':k, 'trajectory': v} for k,v in self.results.items()]
         with open(self.results_path, 'w') as f:
@@ -55,8 +55,8 @@ class BaseAgent(object):
             if looped:
                 break
 
-    
-class StopAgent(BaseAgent):  
+
+class StopAgent(BaseAgent):
     ''' An agent that doesn't move! '''
 
     def rollout(self):
@@ -91,7 +91,7 @@ class RandomAgent(BaseAgent):
                 elif len(ob['navigableLocations']) > 1:
                     actions.append((1, 0, 0)) # go forward
                     self.steps[i] += 1
-                else: 
+                else:
                     actions.append((0, 1, 0)) # turn right until we can go forward
             obs = self.env.step(actions)
             for i,ob in enumerate(obs):
@@ -225,7 +225,7 @@ class Seq2SeqAgent(BaseAgent):
         ctx,h_t,c_t = self.encoder(seq, seq_lengths)
 
         # Initial action
-        a_t = Variable(torch.ones(batch_size).long() * self.model_actions.index('<start>'), 
+        a_t = Variable(torch.ones(batch_size).long() * self.model_actions.index('<start>'),
                     requires_grad=False).cuda()
         ended = np.array([False] * batch_size) # Indices match permuation of the model, not env
 
@@ -239,21 +239,21 @@ class Seq2SeqAgent(BaseAgent):
             # Mask outputs where agent can't move forward
             for i,ob in enumerate(perm_obs):
                 if len(ob['navigableLocations']) <= 1:
-                    logit[i, self.model_actions.index('forward')] = -float('inf')             
+                    logit[i, self.model_actions.index('forward')] = -float('inf')
 
             # Supervised training
             target = self._teacher_action(perm_obs, ended)
             self.loss += self.criterion(logit, target)
 
             # Determine next model inputs
-            if self.feedback == 'teacher': 
+            if self.feedback == 'teacher':
                 a_t = target                # teacher forcing
-            elif self.feedback == 'argmax': 
+            elif self.feedback == 'argmax':
                 _,a_t = logit.max(1)        # student forcing - argmax
                 a_t = a_t.detach()
             elif self.feedback == 'sample':
                 probs = F.softmax(logit)    # sampling an action from model
-                a_t = probs.multinomial().detach()
+                a_t = probs.multinomial(1).detach()
             else:
                 sys.exit('Invalid feedback option')
 
@@ -273,7 +273,7 @@ class Seq2SeqAgent(BaseAgent):
                     traj[i]['path'].append((ob['viewpoint'], ob['heading'], ob['elevation']))
 
             # Early exit if all ended
-            if ended.all(): 
+            if ended.all():
                 break
 
         self.losses.append(self.loss.data[0] / self.episode_len)
