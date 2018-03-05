@@ -20,7 +20,19 @@ class EnvBatch():
     ''' A simple wrapper for a batch of MatterSim environments, 
         using discretized viewpoints and pretrained features '''
 
-    def __init__(self, feature_store=None, batch_size=100):
+    def __init__(self, feature_store=None, batch_size=100, random_features=False):
+        self.random_features = random_features
+        if random_features:
+            features_by_scan_id = {}
+            features_by_view_id = {}
+            def get_feats(id, lookup):
+                if id in lookup:
+                    return lookup[id]
+                else:
+                    rand = np.random.RandomState(hash(id) % 2**32)
+                    feats = np.maximum(0.0, 0.5 * rand.randn(36, 1024) + 0.3)
+                    lookup[id] = feats
+                return lookup[id]
         if feature_store:
             print('Loading image features from %s' % feature_store)
             tsv_fieldnames = ['scanId', 'viewpointId', 'image_w','image_h', 'vfov', 'features']
@@ -32,8 +44,13 @@ class EnvBatch():
                     self.image_w = int(item['image_w'])
                     self.vfov = int(item['vfov'])
                     long_id = self._make_id(item['scanId'], item['viewpointId'])
-                    self.features[long_id] = np.frombuffer(base64.decodebytes(bytearray(item['features'], 'utf-8')),
-                            dtype=np.float32).reshape((36, 2048))
+                    if random_features:
+                        scan_feats = get_feats(item['scanId'], features_by_scan_id)
+                        view_feats = get_feats(item['viewpointId'], features_by_view_id)
+                        features = np.concatenate((scan_feats, view_feats), axis=1)
+                    else:
+                        features = np.frombuffer(base64.decodebytes(bytearray(item['features'], 'utf-8')), dtype=np.float32).reshape((36, 2048))
+                    self.features[long_id] = features
         else:
             print('Image features not provided')
             self.features = None
@@ -100,8 +117,8 @@ class EnvBatch():
 class R2RBatch():
     ''' Implements the Room to Room navigation task, using discretized viewpoints and pretrained features '''
 
-    def __init__(self, feature_store, batch_size=100, seed=10, splits=['train'], tokenizer=None):
-        self.env = EnvBatch(feature_store=feature_store, batch_size=batch_size)
+    def __init__(self, feature_store, batch_size=100, seed=10, splits=['train'], tokenizer=None, random_features=False):
+        self.env = EnvBatch(feature_store=feature_store, batch_size=batch_size, random_features=random_features)
         self.data = []
         self.scans = []
         for item in load_datasets(splits):  

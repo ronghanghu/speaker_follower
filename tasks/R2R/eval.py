@@ -10,8 +10,11 @@ import pprint
 pp = pprint.PrettyPrinter(indent=4)
 
 from env import R2RBatch
+import utils
 from utils import load_datasets, load_nav_graphs
 from agent import BaseAgent, StopAgent, RandomAgent, ShortestAgent
+
+from train import make_arg_parser
 
 
 class Evaluation(object):
@@ -91,10 +94,10 @@ class Evaluation(object):
 
 RESULT_DIR = 'tasks/R2R/results/'
 
-def eval_simple_agents():
+def eval_simple_agents(args):
     ''' Run simple baselines on each split. '''
     for split in ['train', 'val_seen', 'val_unseen', 'test']:
-        env = R2RBatch(None, batch_size=1, splits=[split])
+        env = R2RBatch(None, batch_size=1, splits=[split], random_features=args.random_image_features)
         ev = Evaluation([split])
 
         for agent_type in ['Stop', 'Shortest', 'Random']:
@@ -120,10 +123,9 @@ def eval_seq2seq():
             print('\n%s' % outfile)
             pp.pprint(score_summary)
 
-
 if __name__ == '__main__':
 
-    eval_simple_agents()
+    utils.run(make_arg_parser(), eval_simple_agents)
     #eval_seq2seq()
 
 

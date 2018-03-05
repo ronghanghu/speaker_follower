@@ -10,6 +10,7 @@ import math
 from collections import Counter
 import numpy as np
 import networkx as nx
+import subprocess
 
 
 # padding, unknown word, end of sentence
@@ -144,3 +145,32 @@ def timeSince(since, percent):
     rs = es - s
     return '%s (- %s)' % (asMinutes(s), asMinutes(rs))
 
+
+def run(arg_parser, entry_function):
+    arg_parser.add_argument("--pdb", action='store_true')
+    arg_parser.add_argument("--ipdb", action='store_true')
+
+    args, other_args = arg_parser.parse_known_args()
+
+    def log(out_file):
+        subprocess.call("git rev-parse HEAD", shell=True, stdout=out_file)
+        subprocess.call("git --no-pager diff", shell=True, stdout=out_file)
+        out_file.write('\n\n')
+        out_file.write(' '.join(sys.argv))
+        out_file.write('\n\n')
+        json.dump(vars(args), out_file)
+        out_file.write('\n\n')
+
+    log(sys.stdout)
+    # if 'save_dir' in vars(args) and args.save_dir:
+    #     with open(os.path.join(args.save_dir, 'invoke.log'), 'w') as f:
+    #         log(f)
+
+    if args.ipdb:
+        import ipdb
+        ipdb.runcall(entry_function, args)
+    elif args.pdb:
+        import pdb
+        pdb.runcall(entry_function, args)
+    else:
+        entry_function(args)

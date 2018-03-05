@@ -108,7 +108,7 @@ class AttnDecoderLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
 
     def __init__(self, input_action_size, output_action_size, embedding_size, hidden_size, 
-                      dropout_ratio, feature_size=2048):
+                      dropout_ratio, feature_size=2048, ablate_image_features=False):
         super(AttnDecoderLSTM, self).__init__()
         self.embedding_size = embedding_size
         self.feature_size = feature_size
@@ -118,6 +118,7 @@ class AttnDecoderLSTM(nn.Module):
         self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
         self.attention_layer = SoftDotAttention(hidden_size)
         self.decoder2action = nn.Linear(hidden_size, output_action_size)
+        self.ablate_image_features = ablate_image_features
 
     def forward(self, action, feature, h_0, c_0, ctx, ctx_mask=None):
         ''' Takes a single step in the decoder LSTM (allowing sampling).
@@ -131,6 +132,8 @@ class AttnDecoderLSTM(nn.Module):
         '''
         action_embeds = self.embedding(action)   # (batch, 1, embedding_size)
         action_embeds = action_embeds.squeeze()
+        if self.ablate_image_features:
+            feature = torch.zeros_like(feature)
         concat_input = torch.cat((action_embeds, feature), 1) # (batch, embedding_size+feature_size)
         drop = self.drop(concat_input)
         h_1,c_1 = self.lstm(drop, (h_0,c_0))
@@ -138,5 +141,3 @@ class AttnDecoderLSTM(nn.Module):
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)        
         logit = self.decoder2action(h_tilde)
         return h_1,c_1,alpha,logit
-
-

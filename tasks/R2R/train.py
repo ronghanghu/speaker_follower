@@ -10,12 +10,14 @@ import time
 import numpy as np
 import pandas as pd
 from collections import defaultdict
+import argparse
 
+import utils
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeSince
 from env import R2RBatch
 from model import EncoderLSTM, AttnDecoderLSTM
 from agent import Seq2SeqAgent
-from eval import Evaluation
+import eval
 
 
 TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
@@ -39,10 +41,17 @@ feedback_method = 'sample' # teacher or sample
 learning_rate = 0.0001
 weight_decay = 0.0005
 n_iters = 5000 if feedback_method == 'teacher' else 20000
-model_prefix = 'seq2seq_%s_imagenet' % (feedback_method)
+
+def get_model_prefix(args):
+    model_prefix = 'seq2seq_%s_imagenet' % (feedback_method)
+    if args.ablate_image_features:
+        model_prefix = model_prefix + "_ablate-image-features"
+    if args.random_image_features:
+        model_prefix = model_prefix + "_random-image-features"
+    return model_prefix
 
 
-def train(train_env, encoder, decoder, n_iters, log_every=100, val_envs={}):
+def train(args, train_env, encoder, decoder, n_iters, log_every=100, val_envs={}):
     ''' Train on training set, validating on both seen and unseen. '''
 
     agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
@@ -70,7 +79,7 @@ def train(train_env, encoder, decoder, n_iters, log_every=100, val_envs={}):
         # Run validation
         for env_name, (env, evaluator) in val_envs.items():
             agent.env = env
-            agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, model_prefix, env_name, iter)
+            agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), env_name, iter)
             # Get validation loss under the same conditions as training
             agent.test(use_dropout=True, feedback=feedback_method, allow_cheat=True)
             val_losses = np.array(agent.losses)
@@ -93,12 +102,12 @@ def train(train_env, encoder, decoder, n_iters, log_every=100, val_envs={}):
 
         df = pd.DataFrame(data_log)
         df.set_index('iteration')
-        df_path = '%s%s_log.csv' % (PLOT_DIR, model_prefix)
+        df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args))
         df.to_csv(df_path)
         
         split_string = "-".join(train_env.splits)
-        enc_path = '%s%s_%s_enc_iter_%d' % (SNAPSHOT_DIR, model_prefix, split_string, iter)
-        dec_path = '%s%s_%s_dec_iter_%d' % (SNAPSHOT_DIR, model_prefix, split_string, iter)
+        enc_path = '%s%s_%s_enc_iter_%d' % (SNAPSHOT_DIR, get_model_prefix(args), split_string, iter)
+        dec_path = '%s%s_%s_dec_iter_%d' % (SNAPSHOT_DIR, get_model_prefix(args), split_string, iter)
         agent.save(enc_path, dec_path)
 
 
@@ -112,54 +121,59 @@ def setup():
         write_vocab(build_vocab(splits=['train','val_seen','val_unseen']), TRAINVAL_VOCAB)
 
 
-def test_submission():
+def test_submission(args):
     ''' Train on combined training and validation sets, and generate test submission. '''
   
     setup()
     # Create a batch training environment that will also preprocess text
     vocab = read_vocab(TRAINVAL_VOCAB)
     tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
-    train_env = R2RBatch(features, batch_size=batch_size, splits=['train', 'val_seen', 'val_unseen'], tokenizer=tok)
+    train_env = R2RBatch(features, batch_size=batch_size, splits=['train', 'val_seen', 'val_unseen'], tokenizer=tok, random_features=args.random_image_features)
     
     # Build models and train
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
     encoder = EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx, 
                   dropout_ratio, bidirectional=bidirectional).cuda()
     decoder = AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
-                  action_embedding_size, hidden_size, dropout_ratio).cuda()
-    train(train_env, encoder, decoder, n_iters)
+                  action_embedding_size, hidden_size, dropout_ratio, ablate_image_features=args.ablate_image_features).cuda()
+    train(args, train_env, encoder, decoder, n_iters)
 
     # Generate test submission
-    test_env = R2RBatch(features, batch_size=batch_size, splits=['test'], tokenizer=tok)
+    test_env = R2RBatch(features, batch_size=batch_size, splits=['test'], tokenizer=tok, random_features=args.random_image_features)
     agent = Seq2SeqAgent(test_env, "", encoder, decoder, max_episode_len)
-    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, model_prefix, 'test', 20000)
+    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
     agent.test(use_dropout=False, feedback='argmax')
     agent.write_results()
 
 
-def train_val():
+def train_val(args):
     ''' Train on the training set, and validate on seen and unseen splits. '''
   
     setup()
     # Create a batch training environment that will also preprocess text
     vocab = read_vocab(TRAIN_VOCAB)
     tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
-    train_env = R2RBatch(features, batch_size=batch_size, splits=['train'], tokenizer=tok)
+    train_env = R2RBatch(features, batch_size=batch_size, splits=['train'], tokenizer=tok, random_features=args.random_image_features)
 
     # Creat validation environments
     val_envs = {split: (R2RBatch(features, batch_size=batch_size, splits=[split], 
-                tokenizer=tok), Evaluation([split])) for split in ['val_seen', 'val_unseen']}
+                tokenizer=tok, random_features=args.random_image_features), eval.Evaluation([split])) for split in ['val_seen', 'val_unseen']}
 
     # Build models and train
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
     encoder = EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx, 
                   dropout_ratio, bidirectional=bidirectional).cuda()
     decoder = AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
-                  action_embedding_size, hidden_size, dropout_ratio).cuda()
-    train(train_env, encoder, decoder, n_iters, val_envs=val_envs)
+                  action_embedding_size, hidden_size, dropout_ratio, ablate_image_features=args.ablate_image_features).cuda()
+    train(args, train_env, encoder, decoder, n_iters, val_envs=val_envs)
 
+def make_arg_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ablate_image_features", action='store_true')
+    parser.add_argument("--random_image_features", action='store_true')
+    return parser
 
 if __name__ == "__main__":
-    train_val()
+    utils.run(make_arg_parser(), train_val)
     #test_submission()
 
