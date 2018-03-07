@@ -1,7 +1,7 @@
 project(Matterport_Simulator CXX)
 cmake_minimum_required(VERSION 2.8)
 
-option(OSMESA_RENDERING "Render offscreen with OSMesa" OFF)
+option(OSMESA_RENDERING "Render offscreen with OSMesa" ON)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
@@ -50,12 +50,16 @@ target_link_libraries(mattersim_main MatterSim)
 add_executable(random_agent src/driver/random_agent.cpp)
 target_link_libraries(random_agent MatterSim)
 
+#set(PYTHON_EXECUTABLE "/home/dfried/anaconda2/envs/m3d3/bin/python")
+set(PYTHON_EXECUTABLE "/home/dfried/anaconda2/bin/python")
+set(PYTHON_INCLUDE_DIR "/home/dfried/anaconda2/include")
+set(PYTHON_LIBRARY "/home/dfried/anaconda2/lib")
+
+#find_package(PythonInterp 2.7)
+# message(${PYTHON_EXECUTABLE})
+
 add_subdirectory(pybind11)
 
-set(PYTHON_EXECUTABLE "/home/dfried/anaconda2/envs/m3d3/bin/python")
-
-# find_package(PythonInterp 2.7)
-# message(${PYTHON_EXECUTABLE})
 # 
 # # Need to search for python executable again to pick up an activated
 # # virtualenv python, if any.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 ''' Script to precompute image features using a Caffe ResNet CNN, using 36 discretized views
-    at each viewpoint in 30 degree increments, and the provided camera WIDTH, HEIGHT 
+    at each viewpoint in 30 degree increments, and the provided camera WIDTH, HEIGHT
     and VFOV parameters. '''
 
 import numpy as np
@@ -11,6 +11,8 @@ import math
 import base64
 import csv
 import sys
+import os
+import os.path
 
 csv.field_size_limit(sys.maxsize)
 
@@ -29,12 +31,19 @@ from timer import Timer
 TSV_FIELDNAMES = ['scanId', 'viewpointId', 'image_w','image_h', 'vfov', 'features']
 VIEWPOINT_SIZE = 36 # Number of discretized views from one viewpoint
 FEATURE_SIZE = 2048
+CONV_D1 = 15
+CONV_D2 = 20
+
 BATCH_SIZE = 4  # Some fraction of viewpoint size - batch size 4 equals 11GB memory
 GPU_ID = 0
-PROTO = 'models/ResNet-152-deploy.prototxt'
+PROTO = 'models/ResNet-152-deploy-convolve.prototxt'
 MODEL = 'models/ResNet-152-model.caffemodel'  # You need to download this, see README.md
 #MODEL = 'models/resnet152_places365.caffemodel'
+
+mean_pooled_features = False
+convolutional_features = True
 OUTFILE = 'img_features/ResNet-152-imagenet.tsv'
+CONV_FEATURE_DIR = 'img_features/imagenet_convolutional'
 GRAPHS = 'connectivity/'
 
 # Simulator image parameters
@@ -85,15 +94,31 @@ def build_tsv():
     t_render = Timer()
     t_net = Timer()
     with open(OUTFILE, 'wb') as tsvfile:
-        writer = csv.DictWriter(tsvfile, delimiter = '\t', fieldnames = TSV_FIELDNAMES)          
+        writer = csv.DictWriter(tsvfile, delimiter = '\t', fieldnames = TSV_FIELDNAMES)
 
         # Loop all the viewpoints in the simulator
         viewpointIds = load_viewpointids()
-        for scanId,viewpointId in viewpointIds:
+        it = viewpointIds
+        try:
+            import tqdm
+            it = tqdm.tqdm(it)
+        except:
+            pass
+
+        if convolutional_features:
+            for scanId in set(scanId for scanId, _ in viewpointIds):
+                scan_path = os.path.join(CONV_FEATURE_DIR, scanId)
+                if not os.path.exists(scan_path):
+                    os.makedirs(scan_path)
+
+        for scanId,viewpointId in it:
             t_render.tic()
             # Loop all discretized views from this location
             blobs = []
-            features = np.empty([VIEWPOINT_SIZE, FEATURE_SIZE], dtype=np.float32)
+            if convolutional_features:
+                conv_features = np.empty([VIEWPOINT_SIZE, FEATURE_SIZE, CONV_D1, CONV_D2], dtype=np.float32)
+            if mean_pooled_features:
+                features = np.empty([VIEWPOINT_SIZE, FEATURE_SIZE], dtype=np.float32)
             for ix in range(VIEWPOINT_SIZE):
                 if ix == 0:
                     sim.newEpisode(scanId, viewpointId, 0, math.radians(-30))
@@ -104,7 +129,7 @@ def build_tsv():
 
                 state = sim.getState()
                 assert state.viewIndex == ix
-                
+
                 # Transform and save generated image
                 blobs.append(transform_img(state.rgb))
 
@@ -112,7 +137,7 @@ def build_tsv():
             t_net.tic()
             # Run as many forward passes as necessary
             assert VIEWPOINT_SIZE % BATCH_SIZE == 0
-            forward_passes = VIEWPOINT_SIZE / BATCH_SIZE            
+            forward_passes = VIEWPOINT_SIZE / BATCH_SIZE
             ix = 0
             for f in range(forward_passes):
                 for n in range(BATCH_SIZE):
@@ -121,21 +146,31 @@ def build_tsv():
                     ix += 1
                 # Forward pass
                 output = net.forward()
-                features[f*BATCH_SIZE:(f+1)*BATCH_SIZE, :] = net.blobs['pool5'].data[:,:,0,0]
+                if convolutional_features:
+                    conv_feats = net.blobs['res5c'].data
+                    assert conv_feats.shape[1] == FEATURE_SIZE
+                    assert conv_feats.shape[2] == CONV_D1
+                    assert conv_feats.shape[3] == CONV_D2
+                    conv_features[f*BATCH_SIZE:(f+1)*BATCH_SIZE, :, :, :] = conv_feats
+                if mean_pooled_features:
+                    features[f*BATCH_SIZE:(f+1)*BATCH_SIZE, :] = net.blobs['pool5'].data[:,:,0,0]
 
-            writer.writerow({
-                'scanId': scanId,
-                'viewpointId': viewpointId,
-                'image_w': WIDTH,
-                'image_h': HEIGHT,
-                'vfov' : VFOV,
-                'features': base64.b64encode(features)
-            })
+            if mean_pooled_features:
+                writer.writerow({
+                    'scanId': scanId,
+                    'viewpointId': viewpointId,
+                    'image_w': WIDTH,
+                    'image_h': HEIGHT,
+                    'vfov' : VFOV,
+                    'features': base64.b64encode(features)
+                })
+            if convolutional_features:
+                np.save(os.path.join(CONV_FEATURE_DIR, scanId, "%s.npy" % viewpointId), conv_features)
             count += 1
             t_net.toc()
             if count % 100 == 0:
                 print 'Processed %d / %d viewpoints, %.1fs avg render time, %.1fs avg net time, projected %.1f hours' %\
-                  (count,len(viewpointIds), t_render.average_time, t_net.average_time, 
+                  (count,len(viewpointIds), t_render.average_time, t_net.average_time,
                   (t_render.average_time+t_net.average_time)*len(viewpointIds)/3600)
 
 
@@ -146,9 +181,9 @@ def read_tsv(infile):
         reader = csv.DictReader(tsv_in_file, delimiter='\t', fieldnames = TSV_FIELDNAMES)
         for item in reader:
             item['image_h'] = int(item['image_h'])
-            item['image_w'] = int(item['image_w'])   
-            item['vfov'] = int(item['vfov'])   
-            item['features'] = np.frombuffer(base64.decodestring(item['features']), 
+            item['image_w'] = int(item['image_w'])
+            item['vfov'] = int(item['vfov'])
+            item['features'] = np.frombuffer(base64.decodestring(item['features']),
                     dtype=np.float32).reshape((VIEWPOINT_SIZE, FEATURE_SIZE))
             in_data.append(item)
     return in_data

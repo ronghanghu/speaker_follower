@@ -1,12 +1,10 @@
 #!/bin/bash
-
-#export LD_LIBRARY_PATH=/home/dfried/lib/opencv/build/lib/:${LD_LIBRARY_PATH}
-export LD_LIBRARY_PATH="/home/dfried/local_install/lib/:${LD_LIBRARY_PATH}"
-export CC=gcc-5
-export CXX=g++-5
-
-source activate m3d3
 mkdir build
 cd build
-cmake -DCMAKE_PREFIX_PATH="/home/dfried/local_install/" ..
-make -j12
+
+export CC="gcc-5"
+export CXX="g++-5"
+cmake .. \
+-DPYTHON_INCLUDE_DIR=$(python -c "from distutils.sysconfig import get_python_inc; print(get_python_inc())")  \
+-DPYTHON_LIBRARY=$(python -c "import distutils.sysconfig as sysconfig; print(sysconfig.get_config_var(LIBDIR))") \
+-DPYTHON_EXECUTABLE=$(which python)
