@@ -12,6 +12,7 @@ import random
 import networkx as nx
 import functools
 import os.path
+import time
 
 from utils import load_datasets, load_nav_graphs
 
@@ -78,10 +79,11 @@ class EnvBatch():
         for i, (scanId, viewpointId, heading) in enumerate(zip(scanIds, viewpointIds, headings)):
             self.sims[i].newEpisode(scanId, viewpointId, heading, 0)
 
-    @functools.lru_cache(maxsize=128)
-    def get_convolutional_features(self, scanId, viewpointId):
+    #@functools.lru_cache(maxsize=3000)
+    def get_convolutional_features(self, scanId, viewpointId, viewIndex):
         path = os.path.join(self.convolutional_feature_store, scanId, "%s.npy" % viewpointId)
-        return np.load(path)
+        mmapped = np.load(path, mmap_mode='r')
+        return mmapped[viewIndex,:,:,:]
 
     def getStates(self):
         ''' Get list of states augmented with precomputed image features. rgb field will be empty. '''
@@ -94,8 +96,7 @@ class EnvBatch():
             if self.image_feature_type == 'precomputed' or self.image_feature_type == 'random':
                 feature = self.features[long_id][state.viewIndex,:]
             elif self.image_feature_type == 'attention':
-                conv_feats = self.get_convolutional_features(state.scanId, state.location.viewpointId)
-                feature = conv_feats[state.viewIndex,:,:,:]
+                feature = self.get_convolutional_features(state.scanId, state.location.viewpointId, state.viewIndex)
 
             feature_states.append((feature, state))
         return feature_states
@@ -218,6 +219,7 @@ class R2RBatch():
 
     def _get_obs(self):
         obs = []
+        #start_time = time.time()
         for i,(feature,state) in enumerate(self.env.getStates()):
             item = self.batch[i]
             obs.append({
@@ -235,6 +237,8 @@ class R2RBatch():
             })
             if 'instr_encoding' in item:
                 obs[-1]['instr_encoding'] = item['instr_encoding']
+        #end_time = time.time()
+        #print("get obs in {} seconds".format(end_time - start_time))
         return obs
 
     def reset(self):
