@@ -104,11 +104,33 @@ class SoftDotAttention(nn.Module):
         return h_tilde, attn
 
 
+class SimpleImageAttention(nn.Module):
+    def __init__(self, feature_size, context_size, hidden_size):
+        super(SimpleImageAttention, self).__init__()
+        self.feature_size = feature_size
+        self.context_size = context_size
+        self.hidden_size = hidden_size
+        self.fc1_feature = nn.Conv2d(feature_size, hidden_size, kernel_size=1, bias=False)
+        self.fc1_context = nn.Linear(context_size, hidden_size, bias=True)
+        self.fc2 = nn.Conv2d(hidden_size, 1, kernel_size=1, bias=True)
+
+    def forward(self, feature, context):
+        batch_size = feature.shape[0]
+        feature_hidden = self.fc1_feature(feature)
+        context_hidden = self.fc1_context(context)
+        context_hidden = context_hidden.unsqueeze(-1).unsqueeze(-1)
+        x = feature_hidden + context_hidden
+        x = self.fc2(F.relu(x))
+        x = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1) # batch_size x (width * height) x 1
+        reshaped_features = feature.view(batch_size, self.feature_size, -1) # batch_size x feature_size x (width * height)
+        x = torch.bmm(reshaped_features, x) # batch_size x
+        return x.squeeze(-1)
+
 class AttnDecoderLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
 
     def __init__(self, input_action_size, output_action_size, embedding_size, hidden_size, 
-                      dropout_ratio, feature_size=2048, ablate_image_features=False):
+                      dropout_ratio, feature_size=2048, ablate_image_features=False, attend_to_image=False):
         super(AttnDecoderLSTM, self).__init__()
         self.embedding_size = embedding_size
         self.feature_size = feature_size
@@ -119,6 +141,9 @@ class AttnDecoderLSTM(nn.Module):
         self.attention_layer = SoftDotAttention(hidden_size)
         self.decoder2action = nn.Linear(hidden_size, output_action_size)
         self.ablate_image_features = ablate_image_features
+        self.attend_to_image = attend_to_image
+        if attend_to_image:
+            self.image_attention_layer = SimpleImageAttention(feature_size, hidden_size, hidden_size)
 
     def forward(self, action, feature, h_0, c_0, ctx, ctx_mask=None):
         ''' Takes a single step in the decoder LSTM (allowing sampling).
@@ -134,6 +159,9 @@ class AttnDecoderLSTM(nn.Module):
         action_embeds = action_embeds.squeeze()
         if self.ablate_image_features:
             feature = torch.zeros_like(feature)
+        if self.attend_to_image:
+            feature = self.image_attention_layer(feature, h_0)
+
         concat_input = torch.cat((action_embeds, feature), 1) # (batch, embedding_size+feature_size)
         drop = self.drop(concat_input)
         h_1,c_1 = self.lstm(drop, (h_0,c_0))

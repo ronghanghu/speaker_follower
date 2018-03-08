@@ -179,10 +179,7 @@ class Seq2SeqAgent(BaseAgent):
 
     def _feature_variable(self, obs):
         ''' Extract precomputed features into variable. '''
-        feature_size = obs[0]['feature'].shape[0]
-        features = np.empty((len(obs),feature_size), dtype=np.float32)
-        for i,ob in enumerate(obs):
-            features[i,:] = ob['feature']
+        features = np.stack([ob['feature'] for ob in obs])
         return Variable(torch.from_numpy(features), requires_grad=False).cuda()
 
     def _teacher_action(self, obs, ended):
@@ -299,7 +296,13 @@ class Seq2SeqAgent(BaseAgent):
         self.encoder.train()
         self.decoder.train()
         self.losses = []
-        for iter in range(1, n_iters + 1):
+        it = range(1, n_iters + 1)
+        try:
+            import tqdm
+            it = tqdm.tqdm(it)
+        except:
+            pass
+        for _ in it:
             encoder_optimizer.zero_grad()
             decoder_optimizer.zero_grad()
             self.rollout()

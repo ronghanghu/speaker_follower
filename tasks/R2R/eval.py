@@ -97,7 +97,7 @@ RESULT_DIR = 'tasks/R2R/results/'
 def eval_simple_agents(args):
     ''' Run simple baselines on each split. '''
     for split in ['train', 'val_seen', 'val_unseen', 'test']:
-        env = R2RBatch(None, batch_size=1, splits=[split], random_features=args.random_image_features)
+        env = R2RBatch(args.image_feature_type, None, None, batch_size=1, splits=[split])
         ev = Evaluation([split])
 
         for agent_type in ['Stop', 'Shortest', 'Random']:

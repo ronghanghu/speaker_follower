@@ -10,6 +10,8 @@ import base64
 import json
 import random
 import networkx as nx
+import functools
+import os.path
 
 from utils import load_datasets, load_nav_graphs
 
@@ -20,9 +22,9 @@ class EnvBatch():
     ''' A simple wrapper for a batch of MatterSim environments, 
         using discretized viewpoints and pretrained features '''
 
-    def __init__(self, feature_store=None, batch_size=100, random_features=False):
-        self.random_features = random_features
-        if random_features:
+    def __init__(self, image_feature_type, feature_store=None, convolutional_feature_store=None, batch_size=100):
+        self.image_feature_type = image_feature_type
+        if image_feature_type == 'random':
             features_by_scan_id = {}
             features_by_view_id = {}
             def get_feats(id, lookup):
@@ -33,7 +35,9 @@ class EnvBatch():
                     feats = np.maximum(0.0, 0.5 * rand.randn(36, 1024) + 0.3)
                     lookup[id] = feats
                 return lookup[id]
-        if feature_store:
+        self.convolutional_feature_store = convolutional_feature_store
+        if image_feature_type == 'precomputed' or image_feature_type == 'random':
+            assert feature_store is not None
             print('Loading image features from %s' % feature_store)
             tsv_fieldnames = ['scanId', 'viewpointId', 'image_w','image_h', 'vfov', 'features']
             self.features = {}
@@ -44,7 +48,7 @@ class EnvBatch():
                     self.image_w = int(item['image_w'])
                     self.vfov = int(item['vfov'])
                     long_id = self._make_id(item['scanId'], item['viewpointId'])
-                    if random_features:
+                    if image_feature_type == 'random':
                         scan_feats = get_feats(item['scanId'], features_by_scan_id)
                         view_feats = get_feats(item['viewpointId'], features_by_view_id)
                         features = np.concatenate((scan_feats, view_feats), axis=1)
@@ -73,18 +77,27 @@ class EnvBatch():
     def newEpisodes(self, scanIds, viewpointIds, headings):
         for i, (scanId, viewpointId, heading) in enumerate(zip(scanIds, viewpointIds, headings)):
             self.sims[i].newEpisode(scanId, viewpointId, heading, 0)
-  
+
+    @functools.lru_cache(maxsize=128)
+    def get_convolutional_features(self, scanId, viewpointId):
+        path = os.path.join(self.convolutional_feature_store, scanId, "%s.npy" % viewpointId)
+        return np.load(path)
+
     def getStates(self):
         ''' Get list of states augmented with precomputed image features. rgb field will be empty. '''
         feature_states = []
         for sim in self.sims:
             state = sim.getState()
             long_id = self._make_id(state.scanId, state.location.viewpointId)
-            if self.features:
+            feature = None
+
+            if self.image_feature_type == 'precomputed' or self.image_feature_type == 'random':
                 feature = self.features[long_id][state.viewIndex,:]
-                feature_states.append((feature, state))
-            else:
-                feature_states.append((None, state))
+            elif self.image_feature_type == 'attention':
+                conv_feats = self.get_convolutional_features(state.scanId, state.location.viewpointId)
+                feature = conv_feats[state.viewIndex,:,:,:]
+
+            feature_states.append((feature, state))
         return feature_states
 
     def makeActions(self, actions):
@@ -117,8 +130,8 @@ class EnvBatch():
 class R2RBatch():
     ''' Implements the Room to Room navigation task, using discretized viewpoints and pretrained features '''
 
-    def __init__(self, feature_store, batch_size=100, seed=10, splits=['train'], tokenizer=None, random_features=False):
-        self.env = EnvBatch(feature_store=feature_store, batch_size=batch_size, random_features=random_features)
+    def __init__(self, image_feature_type, feature_store, convolutional_feature_store, batch_size=100, seed=10, splits=['train'], tokenizer=None):
+        self.env = EnvBatch(image_feature_type=image_feature_type, feature_store=feature_store, convolutional_feature_store=convolutional_feature_store, batch_size=batch_size)
         self.data = []
         self.scans = []
         for item in load_datasets(splits):  
