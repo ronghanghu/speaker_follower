@@ -150,7 +150,7 @@ def run(arg_parser, entry_function):
     arg_parser.add_argument("--pdb", action='store_true')
     arg_parser.add_argument("--ipdb", action='store_true')
 
-    args, other_args = arg_parser.parse_known_args()
+    args = arg_parser.parse_args()
 
     def log(out_file):
         subprocess.call("git rev-parse HEAD", shell=True, stdout=out_file)
