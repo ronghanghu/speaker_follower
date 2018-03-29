@@ -10,7 +10,7 @@ class EncoderLSTM(nn.Module):
     ''' Encodes navigation instructions, returning hidden state context (for
         attention methods) and a decoder initial state. '''
 
-    def __init__(self, vocab_size, embedding_size, hidden_size, padding_idx, 
+    def __init__(self, vocab_size, embedding_size, hidden_size, padding_idx,
                             dropout_ratio, bidirectional=False, num_layers=1):
         super(EncoderLSTM, self).__init__()
         self.embedding_size = embedding_size
@@ -19,8 +19,8 @@ class EncoderLSTM(nn.Module):
         self.num_directions = 2 if bidirectional else 1
         self.num_layers = num_layers
         self.embedding = nn.Embedding(vocab_size, embedding_size, padding_idx)
-        self.lstm = nn.LSTM(embedding_size, hidden_size, self.num_layers, 
-                            batch_first=True, dropout=dropout_ratio, 
+        self.lstm = nn.LSTM(embedding_size, hidden_size, self.num_layers,
+                            batch_first=True, dropout=dropout_ratio,
                             bidirectional=bidirectional)
         self.encoder2decoder = nn.Linear(hidden_size * self.num_directions,
             hidden_size * self.num_directions
@@ -42,7 +42,7 @@ class EncoderLSTM(nn.Module):
         return h0.cuda(), c0.cuda()
 
     def forward(self, inputs, lengths):
-        ''' Expects input vocab indices as (batch, seq_len). Also requires a 
+        ''' Expects input vocab indices as (batch, seq_len). Also requires a
             list of lengths for dynamic batching. '''
         embeds = self.embedding(inputs)   # (batch, seq_len, embedding_size)
         embeds = self.drop(embeds)
@@ -66,7 +66,7 @@ class EncoderLSTM(nn.Module):
 
 
 class SoftDotAttention(nn.Module):
-    '''Soft Dot Attention. 
+    '''Soft Dot Attention.
 
     Ref: http://www.aclweb.org/anthology/D15-1166
     Adapted from PyTorch OPEN NMT.
@@ -92,8 +92,8 @@ class SoftDotAttention(nn.Module):
         # Get attention
         attn = torch.bmm(context, target).squeeze(2)  # batch x seq_len
         if mask is not None:
-            # -Inf masking prior to the softmax 
-            attn.data.masked_fill_(mask, -float('inf'))              
+            # -Inf masking prior to the softmax
+            attn.data.masked_fill_(mask, -float('inf'))
         attn = self.sm(attn)
         attn3 = attn.view(attn.size(0), 1, attn.size(1))  # batch x 1 x seq_len
 
@@ -163,8 +163,7 @@ class AttnDecoderLSTM(nn.Module):
         self.attention_layer = SoftDotAttention(hidden_size)
         self.decoder2action = nn.Linear(hidden_size, output_action_size)
         self.ablate_image_features = ablate_image_features
-        if image_attention_layer:
-            self.image_attention_layer = image_attention_layer
+        self.image_attention_layer = image_attention_layer
 
     def forward(self, action, feature, h_0, c_0, ctx, ctx_mask=None):
         ''' Takes a single step in the decoder LSTM (allowing sampling).
