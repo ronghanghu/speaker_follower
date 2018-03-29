@@ -51,9 +51,9 @@ add_executable(random_agent src/driver/random_agent.cpp)
 target_link_libraries(random_agent MatterSim)
 
 #set(PYTHON_EXECUTABLE "/home/dfried/anaconda2/envs/m3d3/bin/python")
-set(PYTHON_EXECUTABLE "/home/dfried/anaconda2/bin/python")
-set(PYTHON_INCLUDE_DIR "/home/dfried/anaconda2/include")
-set(PYTHON_LIBRARY "/home/dfried/anaconda2/lib")
+#set(PYTHON_EXECUTABLE "/home/dfried/anaconda2/bin/python")
+#set(PYTHON_INCLUDE_DIR "/home/dfried/anaconda2/include")
+#set(PYTHON_LIBRARY "/home/dfried/anaconda2/lib")
 
 #find_package(PythonInterp 2.7)
 # message(${PYTHON_EXECUTABLE})
