@@ -14,7 +14,7 @@ import utils
 from utils import load_datasets, load_nav_graphs
 from agent import BaseAgent, StopAgent, RandomAgent, ShortestAgent
 
-from train import make_arg_parser
+import argparse
 
 
 class Evaluation(object):
@@ -48,7 +48,7 @@ class Evaluation(object):
         return near_id
 
     def _score_item(self, instr_id, path):
-        ''' Calculate error based on the final position in trajectory, and also 
+        ''' Calculate error based on the final position in trajectory, and also
             the closest position (oracle stopping rule). '''
         gt = self.gt[int(instr_id.split('_')[0])]
         start = gt['path'][0]
@@ -69,7 +69,7 @@ class Evaluation(object):
     def score(self, output_file):
         ''' Evaluate each agent trajectory based on how close it got to the goal location '''
         self.scores = defaultdict(list)
-        instr_ids = set(self.instr_ids) 
+        instr_ids = set(self.instr_ids)
         with open(output_file) as f:
             for item in json.load(f):
                 # Check against expected ids
@@ -97,7 +97,7 @@ RESULT_DIR = 'tasks/R2R/results/'
 def eval_simple_agents(args):
     ''' Run simple baselines on each split. '''
     for split in ['train', 'val_seen', 'val_unseen', 'test']:
-        env = R2RBatch(args.image_feature_type, None, None, batch_size=1, splits=[split])
+        env = R2RBatch('none', None, None, batch_size=1, splits=[split])
         ev = Evaluation([split])
 
         for agent_type in ['Stop', 'Shortest', 'Random']:
@@ -124,8 +124,7 @@ def eval_seq2seq():
             pp.pprint(score_summary)
 
 if __name__ == '__main__':
-
-    utils.run(make_arg_parser(), eval_simple_agents)
+    utils.run(argparse.ArgumentParser(), eval_simple_agents)
     #eval_seq2seq()
 
 

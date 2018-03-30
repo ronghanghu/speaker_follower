@@ -13,6 +13,9 @@
 *.zip
 /tasks/R2R/data/*.json
 /tasks/R2R/data/*_vocab.txt
+/tasks/R2R/plots/
+/tasks/R2R/results/
+/tasks/R2R/snapshots/
 
 # intellij
 .idea/
