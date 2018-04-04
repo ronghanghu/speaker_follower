@@ -5,6 +5,8 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
+from utils import try_cuda
+
 
 class EncoderLSTM(nn.Module):
     ''' Encodes navigation instructions, returning hidden state context (for
@@ -39,7 +41,7 @@ class EncoderLSTM(nn.Module):
             batch_size,
             self.hidden_size
         ), requires_grad=False)
-        return h0.cuda(), c0.cuda()
+        return try_cuda(h0), try_cuda(c0)
 
     def forward(self, inputs, lengths):
         ''' Expects input vocab indices as (batch, seq_len). Also requires a
@@ -121,10 +123,10 @@ class FeedforwardImageAttention(nn.Module):
         context_hidden = context_hidden.unsqueeze(-1).unsqueeze(-1)
         x = feature_hidden + context_hidden
         x = self.fc2(F.relu(x))
-        x = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1) # batch_size x (width * height) x 1
+        attention = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1) # batch_size x (width * height) x 1
         reshaped_features = feature.view(batch_size, self.feature_size, -1) # batch_size x feature_size x (width * height)
-        x = torch.bmm(reshaped_features, x) # batch_size x
-        return x.squeeze(-1)
+        x = torch.bmm(reshaped_features, attention) # batch_size x
+        return x.squeeze(-1), attention.squeeze(-1)
 
 class MultiplicativeImageAttention(nn.Module):
     def __init__(self, feature_size, context_size, attention_size):
@@ -143,10 +145,10 @@ class MultiplicativeImageAttention(nn.Module):
         context_hidden = context_hidden.unsqueeze(-2) # batch_size x 1 x attention_size
         feature_hidden = feature_hidden.view(batch_size, self.attention_size, -1) # batch_size x attention_size x (width * height)
         x = torch.bmm(context_hidden, feature_hidden) # batch_size x 1 x (width x height)
-        x = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1) # batch_size x (width * height) x 1
+        attention = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1) # batch_size x (width * height) x 1
         reshaped_features = feature.view(batch_size, self.feature_size, -1) # batch_size x feature_size x (width * height)
-        x = torch.bmm(reshaped_features, x) # batch_size x
-        return x.squeeze(-1)
+        x = torch.bmm(reshaped_features, attention) # batch_size x
+        return x.squeeze(-1), attention.squeeze(-1)
 
 class AttnDecoderLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
@@ -180,7 +182,9 @@ class AttnDecoderLSTM(nn.Module):
         if self.ablate_image_features:
             feature = torch.zeros_like(feature)
         if self.image_attention_layer:
-            feature = self.image_attention_layer(feature, h_0)
+            feature, image_attention = self.image_attention_layer(feature, h_0)
+        else:
+            image_attention = None
 
         concat_input = torch.cat((action_embeds, feature), 1) # (batch, embedding_size+feature_size)
         drop = self.drop(concat_input)
@@ -188,4 +192,4 @@ class AttnDecoderLSTM(nn.Module):
         h_1_drop = self.drop(h_1)
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
         logit = self.decoder2action(h_tilde)
-        return h_1,c_1,alpha,logit
+        return h_1,c_1,alpha,image_attention,logit

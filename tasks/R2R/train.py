@@ -13,8 +13,8 @@ from collections import defaultdict
 import argparse
 
 import utils
-from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeSince
-from env import R2RBatch
+from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeSince, try_cuda
+from env import R2RBatch, ImageFeatures
 import model
 from model import EncoderLSTM, AttnDecoderLSTM
 from agent import Seq2SeqAgent
@@ -27,11 +27,8 @@ RESULT_DIR = 'tasks/R2R/results/'
 SNAPSHOT_DIR = 'tasks/R2R/snapshots/'
 PLOT_DIR = 'tasks/R2R/plots/'
 
-IMAGENET_FEATURES = 'img_features/ResNet-152-imagenet.tsv'
 MAX_INPUT_LENGTH = 80
 
-features = IMAGENET_FEATURES
-CONVOLUTIONAL_FEATURE_STORE = 'img_features/imagenet_convolutional'
 batch_size = 100
 max_episode_len = 20
 word_embedding_size = 256
@@ -44,6 +41,8 @@ learning_rate = 0.0001
 weight_decay = 0.0005
 n_iters = 5000 if feedback_method == 'teacher' else 20000
 FEATURE_SIZE = 2048
+log_every=100
+#log_every=20
 
 def get_model_prefix(args):
     model_prefix = 'seq2seq_%s_imagenet' % (feedback_method)
@@ -51,7 +50,7 @@ def get_model_prefix(args):
     return model_prefix
 
 
-def train(args, train_env, encoder, decoder, n_iters, log_every=100, val_envs={}):
+def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_envs={}):
     ''' Train on training set, validating on both seen and unseen. '''
 
     agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
@@ -85,6 +84,7 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=100, val_envs={}
             val_losses = np.array(agent.losses)
             val_loss_avg = np.average(val_losses)
             data_log['%s loss' % env_name].append(val_loss_avg)
+
             # Get validation distance from goal under test evaluation conditions
             agent.test(use_dropout=False, feedback='argmax')
             agent.write_results()
@@ -128,21 +128,21 @@ def test_submission(args):
     # Create a batch training environment that will also preprocess text
     vocab = read_vocab(TRAINVAL_VOCAB)
     tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
-    train_env = R2RBatch(args.image_feature_type, features, CONVOLUTIONAL_FEATURE_STORE, batch_size=batch_size, splits=['train', 'val_seen', 'val_unseen'], tokenizer=tok)
+    image_features = ImageFeatures.from_args(args)
+    train_env = R2RBatch(image_features, batch_size=batch_size, splits=['train', 'val_seen', 'val_unseen'], tokenizer=tok)
     
     # Build models and train
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
-    encoder = EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx, 
-                  dropout_ratio, bidirectional=bidirectional).cuda()
-    decoder = AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
+    encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx,
+                  dropout_ratio, bidirectional=bidirectional))
+    decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
                               action_embedding_size, hidden_size, dropout_ratio,
                               ablate_image_features=args.image_feature_type == "none",
-                              image_attention_layer=make_image_attention_layer(args)).cuda()
+                              image_attention_layer=make_image_attention_layer(args)))
     train(args, train_env, encoder, decoder, n_iters)
 
     # Generate test submission
-    test_env = R2RBatch(args.image_feature_type, features, CONVOLUTIONAL_FEATURE_STORE,
-                        batch_size=batch_size, splits=['test'], tokenizer=tok)
+    test_env = R2RBatch(image_features, batch_size=batch_size, splits=['test'], tokenizer=tok)
     agent = Seq2SeqAgent(test_env, "", encoder, decoder, max_episode_len)
     agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
     agent.test(use_dropout=False, feedback='argmax')
@@ -156,22 +156,21 @@ def train_val(args):
     # Create a batch training environment that will also preprocess text
     vocab = read_vocab(TRAIN_VOCAB)
     tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
-    train_env = R2RBatch(args.image_feature_type, features, CONVOLUTIONAL_FEATURE_STORE,
-                         batch_size=batch_size, splits=['train'], tokenizer=tok)
+    image_features = ImageFeatures.from_args(args)
+    train_env = R2RBatch(image_features, batch_size=batch_size, splits=['train'], tokenizer=tok)
 
     # Creat validation environments
-    val_envs = {split: (R2RBatch(args.image_feature_type, features, CONVOLUTIONAL_FEATURE_STORE,
-                                 batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
+    val_envs = {split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
                 for split in ['val_seen', 'val_unseen']}
 
     # Build models and train
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
-    encoder = EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx,
-                  dropout_ratio, bidirectional=bidirectional).cuda()
+    encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx,
+                  dropout_ratio, bidirectional=bidirectional))
 
-    decoder = AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(), action_embedding_size, hidden_size,
+    decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(), action_embedding_size, hidden_size,
                               dropout_ratio, ablate_image_features=args.image_feature_type == "none",
-                              image_attention_layer=make_image_attention_layer(args)).cuda()
+                              image_attention_layer=make_image_attention_layer(args)))
     train(args, train_env, encoder, decoder, n_iters, val_envs=val_envs)
 
 def make_image_attention_layer(args):
@@ -185,9 +184,12 @@ def make_image_attention_layer(args):
 
 def make_arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image_feature_type", choices=["precomputed", "none", "random", "attention"], default="precomputed")
+    parser.add_argument("--image_feature_type", choices=["mean_pooled", "none", "random", "attention"], default="mean_pooled")
     parser.add_argument("--image_attention_type", choices=["feedforward", "multiplicative"], default="feedforward")
     parser.add_argument("--image_attention_size", type=int)
+
+    parser.add_argument("--mean_pooled_image_feature_store", default="img_features/ResNet-152-imagenet.tsv")
+    parser.add_argument("--convolutional_image_feature_store", default="img_features/imagenet_convolutional")
     return parser
 
 if __name__ == "__main__":

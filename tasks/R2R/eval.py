@@ -9,7 +9,7 @@ import numpy as np
 import pprint
 pp = pprint.PrettyPrinter(indent=4)
 
-from env import R2RBatch
+from env import R2RBatch, ImageFeatures
 import utils
 from utils import load_datasets, load_nav_graphs
 from agent import BaseAgent, StopAgent, RandomAgent, ShortestAgent
@@ -96,8 +96,9 @@ RESULT_DIR = 'tasks/R2R/results/'
 
 def eval_simple_agents(args):
     ''' Run simple baselines on each split. '''
+    img_features = ImageFeatures.from_args(args)
     for split in ['train', 'val_seen', 'val_unseen', 'test']:
-        env = R2RBatch('none', None, None, batch_size=1, splits=[split])
+        env = R2RBatch(img_features, batch_size=1, splits=[split])
         ev = Evaluation([split])
 
         for agent_type in ['Stop', 'Shortest', 'Random']:
@@ -124,7 +125,8 @@ def eval_seq2seq():
             pp.pprint(score_summary)
 
 if __name__ == '__main__':
-    utils.run(argparse.ArgumentParser(), eval_simple_agents)
+    from train import make_arg_parser
+    utils.run(make_arg_parser(), eval_simple_agents)
     #eval_seq2seq()
 
 

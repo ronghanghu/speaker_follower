@@ -87,9 +87,11 @@ class Tokenizer(object):
             else:
                 encoding.append(self.word_to_index['<UNK>'])
         encoding.append(self.word_to_index['<EOS>'])
-        if len(encoding) < self.encoding_length:
+        utterance_length = len(encoding)
+        if utterance_length < self.encoding_length:
             encoding += [self.word_to_index['<PAD>']] * (self.encoding_length-len(encoding))
-        return np.array(encoding[:self.encoding_length])
+        arr = np.array(encoding[:self.encoding_length])
+        return arr, min(self.encoding_length, utterance_length)
 
     def decode_sentence(self, encoding):
         sentence = []
@@ -146,6 +148,28 @@ def timeSince(since, percent):
     return '%s (- %s)' % (asMinutes(s), asMinutes(rs))
 
 
+def structured_map(function, *args, nested=False):
+    #assert all(len(a) == len(args[0]) for a in args[1:])
+    acc = []
+    for t in zip(*args):
+        if nested:
+            mapped = [function(*inner_t) for inner_t in zip(*t)]
+        else:
+            mapped = function(*t)
+        acc.append(mapped)
+    return acc
+
+
+def flatten(lol):
+    return [l for lst in lol for l in lst]
+
+def try_cuda(pytorch_obj):
+    import torch.cuda
+    if torch.cuda.is_available():
+        return pytorch_obj.cuda()
+    else:
+        return pytorch_obj
+
 def run(arg_parser, entry_function):
     arg_parser.add_argument("--pdb", action='store_true')
     arg_parser.add_argument("--ipdb", action='store_true')
@@ -174,3 +198,4 @@ def run(arg_parser, entry_function):
         pdb.runcall(entry_function, args)
     else:
         entry_function(args)
+
