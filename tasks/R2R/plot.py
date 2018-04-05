@@ -92,7 +92,7 @@ def plot_final_scores():
     for split in ['val_seen']:
         ev = Evaluation([split])
         for i,outfile in enumerate(outfiles):
-            score_summary,scores = ev.score(outfile % split)
+            score_summary,scores = ev.score_file(outfile % split)
             if i == 0:
                 method = 'Teacher-forcing'
                 ax.hist(scores['nav_errors'], bins=list(range(0,30,3)), label=method, normed=True, histtype = 'step', linewidth=2.5, color='C1')

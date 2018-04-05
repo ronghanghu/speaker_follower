@@ -66,18 +66,25 @@ class Evaluation(object):
             prev = curr
         self.scores['trajectory_lengths'].append(distance)
 
-    def score(self, output_file):
-        ''' Evaluate each agent trajectory based on how close it got to the goal location '''
+
+    def score_results(self, results):
+        # results should be a dictionary mapping instr_ids to dictionaries, with each dictionary containing (at least) a 'trajectory' field
         self.scores = defaultdict(list)
+        model_scores = []
         instr_ids = set(self.instr_ids)
-        with open(output_file) as f:
-            for item in json.load(f):
-                # Check against expected ids
-                if item['instr_id'] in instr_ids:
-                    instr_ids.remove(item['instr_id'])
-                    self._score_item(item['instr_id'], item['trajectory'])
-        assert len(instr_ids) == 0, 'Missing %d of %d instruction ids from %s - not in %s'\
-                       % (len(instr_ids), len(self.instr_ids), ",".join(self.splits), output_file)
+
+        instr_count = 0
+        for instr_id, result in results.items():
+            if instr_id in instr_ids:
+                instr_count += 1
+                instr_ids.remove(instr_id)
+                self._score_item(instr_id, result['trajectory'])
+                if 'score' in result:
+                    model_scores.append(result['score'])
+
+        assert len(instr_ids) == 0, 'Missing %d of %d instruction ids from %s' \
+                                    % (len(instr_ids), len(self.instr_ids), ",".join(self.splits))
+
         assert len(self.scores['nav_errors']) == len(self.instr_ids)
         score_summary = {
             'nav_error': np.average(self.scores['nav_errors']),
@@ -85,11 +92,20 @@ class Evaluation(object):
             'steps': np.average(self.scores['trajectory_steps']),
             'lengths': np.average(self.scores['trajectory_lengths'])
         }
+        if len(model_scores) > 0:
+            assert len(model_scores) == instr_count
+            score_summary['model_score'] = np.average(model_scores)
+
         num_successes = len([i for i in self.scores['nav_errors'] if i < self.error_margin])
         score_summary['success_rate'] = float(num_successes)/float(len(self.scores['nav_errors']))
         oracle_successes = len([i for i in self.scores['oracle_errors'] if i < self.error_margin])
         score_summary['oracle_rate'] = float(oracle_successes)/float(len(self.scores['oracle_errors']))
         return score_summary, self.scores
+
+    def score_file(self, output_file):
+        ''' Evaluate each agent trajectory based on how close it got to the goal location '''
+        with open(output_file) as f:
+            return self.score_results(json.load(f))
 
 
 RESULT_DIR = 'tasks/R2R/results/'
@@ -106,7 +122,7 @@ def eval_simple_agents(args):
             agent = BaseAgent.get_agent(agent_type)(env, outfile)
             agent.test()
             agent.write_results()
-            score_summary, _ = ev.score(outfile)
+            score_summary, _ = ev.score_file(outfile)
             print('\n%s' % agent_type)
             pp.pprint(score_summary)
 
@@ -120,7 +136,7 @@ def eval_seq2seq():
     for outfile in outfiles:
         for split in ['val_seen', 'val_unseen']:
             ev = Evaluation([split])
-            score_summary, _ = ev.score(outfile % split)
+            score_summary, _ = ev.score_file(outfile % split)
             print('\n%s' % outfile)
             pp.pprint(score_summary)
 

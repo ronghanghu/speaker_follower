@@ -43,9 +43,8 @@ class BaseAgent(object):
         self.losses = [] # For learning agents
 
     def write_results(self):
-        output = [{'instr_id':k, 'trajectory': v} for k,v in self.results.items()]
         with open(self.results_path, 'w') as f:
-            json.dump(output, f)
+            json.dump(self.results, f)
 
     def rollout(self):
         ''' Return a list of dicts containing instr_id:'xx', path:[(viewpointId, heading_rad, elevation_rad)]  '''
@@ -59,6 +58,7 @@ class BaseAgent(object):
         self.env.reset_epoch()
         self.losses = []
         self.results = {}
+
         # We rely on env showing the entire batch before repeating anything
         #print 'Testing %s' % self.__class__.__name__
         looped = False
@@ -66,36 +66,36 @@ class BaseAgent(object):
         beam_10_scores = []
         while True:
             rollout_results = self.rollout()
-            if self.feedback == 'argmax':
-                beam_results = self.beam_search(1, load_next_minibatch=False)
-                assert len(rollout_results) == len(beam_results)
-                for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
-                    assert rollout_traj['instr_id'] == beam_trajs[0]['instr_id']
-                    assert rollout_traj['path'] == beam_trajs[0]['path']
-                    assert np.allclose(rollout_traj['score'], beam_trajs[0]['score'])
-                print("passed check: beam_search with beam_size=1")
-
-                self.env.set_beam_size(10)
-                beam_results = self.beam_search(10, load_next_minibatch=False)
-                assert len(rollout_results) == len(beam_results)
-                for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
-                    rollout_score = rollout_traj['score']
-                    rollout_scores.append(rollout_score)
-                    beam_score = beam_trajs[0]['score']
-                    beam_10_scores.append(beam_score)
-                    assert rollout_score <= beam_score
-                self.env.set_beam_size(1)
-                print("passed check: beam_search with beam_size=10")
-            for traj in rollout_results:
-                if traj['instr_id'] in self.results:
+            # if self.feedback == 'argmax':
+            #     beam_results = self.beam_search(1, load_next_minibatch=False)
+            #     assert len(rollout_results) == len(beam_results)
+            #     for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
+            #         assert rollout_traj['instr_id'] == beam_trajs[0]['instr_id']
+            #         assert rollout_traj['trajectory'] == beam_trajs[0]['trajectory']
+            #         assert np.allclose(rollout_traj['score'], beam_trajs[0]['score'])
+            #     print("passed check: beam_search with beam_size=1")
+            #
+            #     self.env.set_beam_size(10)
+            #     beam_results = self.beam_search(10, load_next_minibatch=False)
+            #     assert len(rollout_results) == len(beam_results)
+            #     for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
+            #         rollout_score = rollout_traj['score']
+            #         rollout_scores.append(rollout_score)
+            #         beam_score = beam_trajs[0]['score']
+            #         beam_10_scores.append(beam_score)
+            #         # assert rollout_score <= beam_score
+            #     self.env.set_beam_size(1)
+            #     # print("passed check: beam_search with beam_size=10")
+            for result in rollout_results:
+                if result['instr_id'] in self.results:
                     looped = True
                 else:
-                    self.results[traj['instr_id']] = traj['path']
+                    self.results[result['instr_id']] = result
             if looped:
                 break
-        if self.feedback == 'argmax':
-            print("avg rollout score: ", np.mean(rollout_scores))
-            print("avg beam 10 score: ", np.mean(beam_10_scores))
+        # if self.feedback == 'argmax':
+        #     print("avg rollout score: ", np.mean(rollout_scores))
+        #     print("avg beam 10 score: ", np.mean(beam_10_scores))
 
 def path_element_from_observation(ob):
     return (ob['viewpoint'], ob['heading'], ob['elevation'])
@@ -108,7 +108,7 @@ class StopAgent(BaseAgent):
         obs = self.env.observe(world_states)
         traj = [{
             'instr_id': ob['instr_id'],
-            'path': [path_element_from_observation(ob) ]
+            'trajectory': [path_element_from_observation(ob) ]
         } for ob in obs]
         return traj
 
@@ -122,7 +122,7 @@ class RandomAgent(BaseAgent):
         obs = self.env.observe(world_states)
         traj = [{
             'instr_id': ob['instr_id'],
-            'path': [path_element_from_observation(ob)]
+            'trajectory': [path_element_from_observation(ob)]
         } for ob in obs]
         self.steps = random.sample(list(range(-11,1)), len(obs))
         ended = [False] * len(obs)
@@ -144,7 +144,7 @@ class RandomAgent(BaseAgent):
             obs = self.env.observe(world_states)
             for i,ob in enumerate(obs):
                 if not ended[i]:
-                    traj[i]['path'].append(path_element_from_observation(ob))
+                    traj[i]['trajectory'].append(path_element_from_observation(ob))
         return traj
 
 
@@ -156,7 +156,7 @@ class ShortestAgent(BaseAgent):
         obs = self.env.observe(world_states)
         traj = [{
             'instr_id': ob['instr_id'],
-            'path': [path_element_from_observation(ob)]
+            'trajectory': [path_element_from_observation(ob)]
         } for ob in obs]
         ended = np.array([False] * len(obs))
         while True:
@@ -168,7 +168,7 @@ class ShortestAgent(BaseAgent):
                     ended[i] = True
             for i,ob in enumerate(obs):
                 if not ended[i]:
-                    traj[i]['path'].append(path_element_from_observation(ob))
+                    traj[i]['trajectory'].append(path_element_from_observation(ob))
             if ended.all():
                 break
         return traj
@@ -194,13 +194,14 @@ class Seq2SeqAgent(BaseAgent):
     end_index = model_actions.index('<end>')
     feedback_options = ['teacher', 'argmax', 'sample']
 
-    def __init__(self, env, results_path, encoder, decoder, episode_len=20):
+    def __init__(self, env, results_path, encoder, decoder, episode_len=20, beam_size=1):
         super(Seq2SeqAgent, self).__init__(env, results_path)
         self.encoder = encoder
         self.decoder = decoder
         self.episode_len = episode_len
         self.losses = []
         self.criterion = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
+        self.beam_size = beam_size
 
     @staticmethod
     def n_inputs():
@@ -258,6 +259,15 @@ class Seq2SeqAgent(BaseAgent):
 
 
     def rollout(self):
+        if self.beam_size == 1:
+            return self._rollout_with_loss()
+        else:
+            assert self.beam_size >= 1
+            beams = self.beam_search(self.beam_size)
+            return [beam[0] for beam in beams]
+
+
+    def _rollout_with_loss(self):
         world_states = self.env.reset(sort=True)
         obs = self.env.observe(world_states)
         obs = np.array(obs)
@@ -269,7 +279,7 @@ class Seq2SeqAgent(BaseAgent):
         # Record starting point
         traj = [{
             'instr_id': ob['instr_id'],
-            'path': [path_element_from_observation(ob)],
+            'trajectory': [path_element_from_observation(ob)],
             'actions': []
         } for ob in obs]
 
@@ -285,7 +295,7 @@ class Seq2SeqAgent(BaseAgent):
         # Do a sequence rollout and calculate the loss
         self.loss = 0
         env_action = [None] * batch_size
-        sequence_scores = torch.zeros(batch_size)
+        sequence_scores = try_cuda(torch.zeros(batch_size))
         for t in range(self.episode_len):
 
             f_t = self._feature_variable(obs) # Image features from obs
@@ -314,11 +324,10 @@ class Seq2SeqAgent(BaseAgent):
             action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
             sequence_scores += action_scores
 
-            # Updated 'ended' list and make environment action
+            # dfried: I changed this so that the ended list is updated afterward; this causes <end> to be added as the last action, along with its score, and the final world state will be duplicated (to more closely match beam search)
+            # Make environment action
             for i in range(batch_size):
                 action_idx = a_t[i].data[0]
-                if action_idx == self.model_actions.index('<end>'):
-                    ended[i] = True
                 env_action[i] = self.env_actions[action_idx]
 
             world_states = self.env.step(world_states, env_action)
@@ -328,9 +337,16 @@ class Seq2SeqAgent(BaseAgent):
             # Save trajectory output
             for i,ob in enumerate(obs):
                 if not ended[i]:
-                    traj[i]['path'].append(path_element_from_observation(ob))
+                    traj[i]['trajectory'].append(path_element_from_observation(ob))
                     traj[i]['score'] = sequence_scores[i]
                     traj[i]['actions'].append(a_t.data[i])
+
+            # Update ended list
+            for i in range(batch_size):
+                action_idx = a_t[i].data[0]
+                if action_idx == self.model_actions.index('<end>'):
+                    ended[i] = True
+
             # Early exit if all ended
             if ended.all():
                 break
@@ -350,10 +366,6 @@ class Seq2SeqAgent(BaseAgent):
         # Forward through encoder, giving initial hidden state and memory cell for decoder
         ctx,h_t,c_t = self.encoder(seq, seq_lengths)
 
-        # Initial action
-        # a_t = Variable(torch.ones(batch_size).long() * self.model_actions.index('<start>'),
-        #                requires_grad=False).cuda()
-
         completed = []
         for _ in range(batch_size):
             completed.append([])
@@ -371,23 +383,14 @@ class Seq2SeqAgent(BaseAgent):
 
         # Do a sequence rollout and calculate the loss
         for t in range(self.episode_len):
-            # new_world_states = []
             flat_indices = []
             beam_indices = []
             a_t_list = []
             for beam_index, beam in enumerate(beams):
-                # nws = []
                 for inf_state in beam:
                     beam_indices.append(beam_index)
-                    # nws.append(inf_state.world_state)
                     flat_indices.append(inf_state.flat_index)
                     a_t_list.append(inf_state.last_action)
-                # new_world_states.append(nws)
-            # if t == 0:
-            #     assert world_states == new_world_states
-            # else:
-            #     world_states = new_world_states
-            #     obs = self.env.observe(world_states, beamed=True)
 
             a_t = try_cuda(Variable(torch.LongTensor(a_t_list), requires_grad=False))
             flat_obs = flatten(obs)
@@ -420,21 +423,22 @@ class Seq2SeqAgent(BaseAgent):
                 successors = []
                 end_index = start_index + len(beam)
                 assert len(beam_world_states) == len(beam)
-                for inf_index, (inf_state, world_state, action_score_row, action_index_row) in \
-                        enumerate(zip(beam, beam_world_states, action_scores[start_index:end_index], action_indices[start_index:end_index])):
-                    for action_score, action_index in zip(action_score_row, action_index_row):
-                        flat_index = start_index + inf_index
-                        if no_forward_mask[flat_index] and action_index == self.forward_index:
-                            continue
-                        successors.append(
-                            InferenceState(prev_inference_state=inf_state,
-                                           world_state=world_state, # will be updated later after successors are pruned
-                                           observation=None, # will be updated later after successors are pruned
-                                           flat_index=flat_index,
-                                           last_action=action_index,
-                                           action_count=inf_state.action_count + 1,
-                                           score=inf_state.score + action_score)
-                        )
+                if beam:
+                    for inf_index, (inf_state, world_state, action_score_row, action_index_row) in \
+                            enumerate(zip(beam, beam_world_states, action_scores[start_index:end_index], action_indices[start_index:end_index])):
+                        for action_score, action_index in zip(action_score_row, action_index_row):
+                            flat_index = start_index + inf_index
+                            if no_forward_mask[flat_index] and action_index == self.forward_index:
+                                continue
+                            successors.append(
+                                InferenceState(prev_inference_state=inf_state,
+                                               world_state=world_state, # will be updated later after successors are pruned
+                                               observation=None, # will be updated later after successors are pruned
+                                               flat_index=flat_index,
+                                               last_action=action_index,
+                                               action_count=inf_state.action_count + 1,
+                                               score=inf_state.score + action_score)
+                            )
                 start_index = end_index
                 successors = sorted(successors, key=lambda t: t.score, reverse=True)[:beam_size]
                 all_successors.append(successors)
@@ -493,13 +497,13 @@ class Seq2SeqAgent(BaseAgent):
             for inf_state in sorted(this_completed, key=lambda t: t.score, reverse=True)[:beam_size]:
                 path_states, path_observations, path_actions = backchain_inference_states(inf_state)
                 # this will have messed-up headings for (at least some) starting locations because of
-                # discretization
+                # discretization, so read from the observations instead
                 ## path = [(obs.viewpointId, state.heading, state.elevation)
                 ##         for state in path_states]
-                path = [path_element_from_observation(ob) for ob in path_observations]
+                trajectory = [path_element_from_observation(ob) for ob in path_observations]
                 this_trajs.append({
                     'instr_id': path_observations[0]['instr_id'],
-                    'path': path,
+                    'trajectory': trajectory,
                     # 'observations': path_observations,
                     'actions': path_actions,
                     'score': inf_state.score,
@@ -507,7 +511,7 @@ class Seq2SeqAgent(BaseAgent):
             trajs.append(this_trajs)
         return trajs
 
-    def test(self, use_dropout=False, feedback='argmax', allow_cheat=False):
+    def test(self, use_dropout=False, feedback='argmax', allow_cheat=False, beam_size=1):
         ''' Evaluate once on each instruction in the current environment '''
         if not allow_cheat: # permitted for purpose of calculating validation loss only
             assert feedback in ['argmax', 'sample'] # no cheating by using teacher at test time!
@@ -518,6 +522,9 @@ class Seq2SeqAgent(BaseAgent):
         else:
             self.encoder.eval()
             self.decoder.eval()
+        if self.env.beam_size < beam_size:
+            self.env.set_beam_size(beam_size)
+        self.beam_size = beam_size
         super(Seq2SeqAgent, self).test()
 
     def train(self, encoder_optimizer, decoder_optimizer, n_iters, feedback='teacher'):
@@ -536,7 +543,7 @@ class Seq2SeqAgent(BaseAgent):
         for _ in it:
             encoder_optimizer.zero_grad()
             decoder_optimizer.zero_grad()
-            self.rollout()
+            self._rollout_with_loss()
             self.loss.backward()
             encoder_optimizer.step()
             decoder_optimizer.step()
@@ -550,4 +557,3 @@ class Seq2SeqAgent(BaseAgent):
         ''' Loads parameters (but not training state) '''
         self.encoder.load_state_dict(torch.load(encoder_path))
         self.decoder.load_state_dict(torch.load(decoder_path))
-

@@ -49,9 +49,15 @@ def get_model_prefix(args):
     model_prefix = model_prefix + "_" + args.image_feature_type
     return model_prefix
 
+def eval_model(agent, results_path, use_dropout, feedback, allow_cheat=False):
+    agent.results_path = results_path
+    agent.test(use_dropout=use_dropout, feedback=feedback, allow_cheat=allow_cheat)
 
-def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_envs={}):
+def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_envs=None):
     ''' Train on training set, validating on both seen and unseen. '''
+
+    if val_envs is None:
+        val_envs = {}
 
     agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
     print('Training with %s feedback' % feedback_method)
@@ -78,17 +84,22 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_e
         # Run validation
         for env_name, (env, evaluator) in val_envs.items():
             agent.env = env
-            agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), env_name, iter)
             # Get validation loss under the same conditions as training
             agent.test(use_dropout=True, feedback=feedback_method, allow_cheat=True)
             val_losses = np.array(agent.losses)
             val_loss_avg = np.average(val_losses)
             data_log['%s loss' % env_name].append(val_loss_avg)
 
+            agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), env_name, iter)
             # Get validation distance from goal under test evaluation conditions
             agent.test(use_dropout=False, feedback='argmax')
             agent.write_results()
-            score_summary, _ = evaluator.score(agent.results_path)
+            score_summary, _ = evaluator.score_file(agent.results_path)
+
+            # TODO: testing code, remove
+            score_summary_direct, _ = evaluator.score_results(agent.results)
+            assert score_summary == score_summary_direct
+
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
             for metric,val in score_summary.items():
                 data_log['%s %s' % (env_name,metric)].append(val)
@@ -121,58 +132,6 @@ def setup():
         write_vocab(build_vocab(splits=['train','val_seen','val_unseen']), TRAINVAL_VOCAB)
 
 
-def test_submission(args):
-    ''' Train on combined training and validation sets, and generate test submission. '''
-  
-    setup()
-    # Create a batch training environment that will also preprocess text
-    vocab = read_vocab(TRAINVAL_VOCAB)
-    tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
-    image_features = ImageFeatures.from_args(args)
-    train_env = R2RBatch(image_features, batch_size=batch_size, splits=['train', 'val_seen', 'val_unseen'], tokenizer=tok)
-    
-    # Build models and train
-    enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
-    encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx,
-                  dropout_ratio, bidirectional=bidirectional))
-    decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
-                              action_embedding_size, hidden_size, dropout_ratio,
-                              ablate_image_features=args.image_feature_type == "none",
-                              image_attention_layer=make_image_attention_layer(args)))
-    train(args, train_env, encoder, decoder, n_iters)
-
-    # Generate test submission
-    test_env = R2RBatch(image_features, batch_size=batch_size, splits=['test'], tokenizer=tok)
-    agent = Seq2SeqAgent(test_env, "", encoder, decoder, max_episode_len)
-    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
-    agent.test(use_dropout=False, feedback='argmax')
-    agent.write_results()
-
-
-def train_val(args):
-    ''' Train on the training set, and validate on seen and unseen splits. '''
-  
-    setup()
-    # Create a batch training environment that will also preprocess text
-    vocab = read_vocab(TRAIN_VOCAB)
-    tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
-    image_features = ImageFeatures.from_args(args)
-    train_env = R2RBatch(image_features, batch_size=batch_size, splits=['train'], tokenizer=tok)
-
-    # Creat validation environments
-    val_envs = {split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
-                for split in ['val_seen', 'val_unseen']}
-
-    # Build models and train
-    enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
-    encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx,
-                  dropout_ratio, bidirectional=bidirectional))
-
-    decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(), action_embedding_size, hidden_size,
-                              dropout_ratio, ablate_image_features=args.image_feature_type == "none",
-                              image_attention_layer=make_image_attention_layer(args)))
-    train(args, train_env, encoder, decoder, n_iters, val_envs=val_envs)
-
 def make_image_attention_layer(args):
     if args.image_feature_type != 'attention':
         return None
@@ -181,6 +140,43 @@ def make_image_attention_layer(args):
         return model.FeedforwardImageAttention(FEATURE_SIZE, hidden_size, image_attention_size)
     elif args.image_attention_type == 'multiplicative':
         return model.MultiplicativeImageAttention(FEATURE_SIZE, hidden_size, image_attention_size)
+
+
+def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
+    setup()
+    image_features = ImageFeatures.from_args(args)
+    vocab = read_vocab(train_vocab_path)
+    tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
+    train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
+
+    enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
+    encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, padding_idx,
+                                   dropout_ratio, bidirectional=bidirectional))
+    decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
+                                       action_embedding_size, hidden_size, dropout_ratio,
+                                       ablate_image_features=image_features.image_feature_type == "none",
+                                       image_attention_layer=make_image_attention_layer(args)))
+    test_envs = {split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
+                for split in test_splits}
+    return train_env, test_envs, encoder, decoder
+
+def train_val(args):
+    ''' Train on the training set, and validate on seen and unseen splits. '''
+    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['val_seen', 'val_unseen'])
+    train(args, train_env, encoder, decoder, n_iters, val_envs=val_envs)
+
+def test_submission(args):
+    ''' Train on combined training and validation sets, and generate test submission. '''
+    train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
+    test_env = test_envs['test']
+
+    train(args, train_env, encoder, decoder, n_iters)
+
+    agent = Seq2SeqAgent(test_env, "", encoder, decoder, max_episode_len)
+    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
+    agent.test(use_dropout=False, feedback='argmax')
+    agent.write_results()
+
 
 def make_arg_parser():
     parser = argparse.ArgumentParser()

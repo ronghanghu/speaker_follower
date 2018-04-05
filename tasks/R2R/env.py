@@ -90,7 +90,7 @@ class ImageFeatures(object):
 
     def get_features(self, state):
         long_id = self._make_id(state.scanId, state.location.viewpointId)
-        if self.image_feature_type == 'precomputed' or self.image_feature_type == 'random':
+        if self.image_feature_type == 'mean_pooled' or self.image_feature_type == 'random':
             return self.features[long_id][state.viewIndex,:]
         elif self.image_feature_type == 'attention':
             return self._get_convolutional_features(state.scanId, state.location.viewpointId, state.viewIndex)
@@ -166,7 +166,6 @@ class EnvBatch():
             environment may not longer be navigable. '''
         def f(sim, index):
             if index == 0:
-                # TODO: here
                 sim.makeAction(1, 0, 0)
             elif index == 1:
                 sim.makeAction(0,-1, 0)
@@ -290,6 +289,7 @@ class R2RBatch():
             item = self.batch[i]
             obs_batch = []
             for state in states_beam if beamed else [states_beam]:
+                assert item['scan'] == state.scanId
                 feature = self.image_features.get_features(state)
                 ob = {
                     'instr_id' : item['instr_id'],
