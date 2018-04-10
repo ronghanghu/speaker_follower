@@ -8,6 +8,8 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from utils import try_cuda
 
 
+# TODO: try variational dropout (or zoneout?)
+
 class EncoderLSTM(nn.Module):
     ''' Encodes navigation instructions, returning hidden state context (for
         attention methods) and a decoder initial state. '''
@@ -28,9 +30,8 @@ class EncoderLSTM(nn.Module):
             hidden_size * self.num_directions
         )
 
-    def init_state(self, inputs):
+    def init_state(self, batch_size):
         ''' Initialize to zero cell states and hidden states.'''
-        batch_size = inputs.size(0)
         h0 = Variable(torch.zeros(
             self.num_layers * self.num_directions,
             batch_size,
@@ -46,9 +47,10 @@ class EncoderLSTM(nn.Module):
     def forward(self, inputs, lengths):
         ''' Expects input vocab indices as (batch, seq_len). Also requires a
             list of lengths for dynamic batching. '''
+        batch_size = inputs.size(0)
         embeds = self.embedding(inputs)   # (batch, seq_len, embedding_size)
         embeds = self.drop(embeds)
-        h0, c0 = self.init_state(inputs)
+        h0, c0 = self.init_state(batch_size)
         packed_embeds = pack_padded_sequence(embeds, lengths, batch_first=True)
         enc_h, (enc_h_t, enc_c_t) = self.lstm(packed_embeds, (h0, c0))
 
@@ -193,3 +195,99 @@ class AttnDecoderLSTM(nn.Module):
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
         logit = self.decoder2action(h_tilde)
         return h_1,c_1,alpha,image_attention,logit
+
+## speaker models
+
+class SpeakerEncoderLSTM(nn.Module):
+    def __init__(self, num_actions, action_embedding_size, world_embedding_size, hidden_size, padding_idx,
+                 dropout_ratio, bidirectional=False, num_layers=1):
+        super(SpeakerEncoderLSTM, self).__init__()
+        self.num_actions = num_actions
+        self.action_embedding_size = action_embedding_size
+        self.word_embedding_size = world_embedding_size
+        self.hidden_size = hidden_size
+        self.drop = nn.Dropout(p=dropout_ratio)
+        self.num_directions = 2 if bidirectional else 1
+        self.num_layers = num_layers
+        self.embedding = nn.Embedding(num_actions, action_embedding_size, padding_idx)
+        self.lstm = nn.LSTM(action_embedding_size + world_embedding_size, hidden_size, self.num_layers,
+                            batch_first=True, dropout=dropout_ratio,
+                            bidirectional=bidirectional)
+        self.encoder2decoder = nn.Linear(hidden_size * self.num_directions,
+                                         hidden_size * self.num_directions
+                                         )
+
+    def init_state(self, batch_size):
+        ''' Initialize to zero cell states and hidden states.'''
+        h0 = Variable(torch.zeros(
+            self.num_layers * self.num_directions,
+            batch_size,
+            self.hidden_size
+        ), requires_grad=False)
+        c0 = Variable(torch.zeros(
+            self.num_layers * self.num_directions,
+            batch_size,
+            self.hidden_size
+        ), requires_grad=False)
+        return try_cuda(h0), try_cuda(c0)
+
+    def forward(self, action_inputs, world_state_embeddings, lengths):
+        ''' Expects action indices as (batch, seq_len). Also requires a
+            list of lengths for dynamic batching. '''
+        batch_size = action_inputs.size(0)
+        assert batch_size == world_state_embeddings.size(0)
+
+        action_embeds = self.embedding(action_inputs)   # (batch, seq_len, embedding_size)
+        embeds = torch.cat([action_embeds, world_state_embeddings], dim=2)
+        embeds = self.drop(embeds)
+        h0, c0 = self.init_state(batch_size)
+        packed_embeds = pack_padded_sequence(embeds, lengths, batch_first=True)
+        enc_h, (enc_h_t, enc_c_t) = self.lstm(packed_embeds, (h0, c0))
+
+        if self.num_directions == 2:
+            h_t = torch.cat((enc_h_t[-1], enc_h_t[-2]), 1)
+            c_t = torch.cat((enc_c_t[-1], enc_c_t[-2]), 1)
+        else:
+            h_t = enc_h_t[-1]
+            c_t = enc_c_t[-1] # (batch, hidden_size)
+
+        decoder_init = nn.Tanh()(self.encoder2decoder(h_t))
+
+        ctx, lengths = pad_packed_sequence(enc_h, batch_first=True)
+        ctx = self.drop(ctx)
+        return ctx,decoder_init,c_t  # (batch, seq_len, hidden_size*num_directions)
+        # (batch, hidden_size)
+
+
+class SpeakerDecoderLSTM(nn.Module):
+
+    def __init__(self, vocab_size, vocab_embedding_size, hidden_size, dropout_ratio):
+        super(SpeakerDecoderLSTM, self).__init__()
+        self.vocab_size = vocab_size
+        self.vocab_embedding_size = vocab_embedding_size
+        self.hidden_size = hidden_size
+        self.embedding = nn.Embedding(vocab_size, vocab_embedding_size)
+        self.drop = nn.Dropout(p=dropout_ratio)
+        self.lstm = nn.LSTMCell(vocab_embedding_size, hidden_size)
+        self.attention_layer = SoftDotAttention(hidden_size)
+        self.decoder2action = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, previous_word, h_0, c_0, ctx, ctx_mask=None):
+        ''' Takes a single step in the decoder LSTM (allowing sampling).
+
+        action: batch x 1
+        feature: batch x feature_size
+        h_0: batch x hidden_size
+        c_0: batch x hidden_size
+        ctx: batch x seq_len x dim
+        ctx_mask: batch x seq_len - indices to be masked
+        '''
+        word_embeds = self.embedding(previous_word)   # (batch, 1, embedding_size)
+        word_embeds = word_embeds.squeeze()
+
+        drop = self.drop(word_embeds)
+        h_1,c_1 = self.lstm(drop, (h_0,c_0))
+        h_1_drop = self.drop(h_1)
+        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
+        logit = self.decoder2action(h_tilde)
+        return h_1,c_1,alpha,logit

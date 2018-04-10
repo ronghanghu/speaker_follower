@@ -14,8 +14,10 @@ import subprocess
 
 
 # padding, unknown word, end of sentence
-base_vocab = ['<PAD>', '<UNK>', '<EOS>']
-padding_idx = base_vocab.index('<PAD>')
+base_vocab = ['<PAD>', '<UNK>', '<EOS>', '<BOS>']
+vocab_padding_idx = base_vocab.index('<PAD>')
+vocab_bos_idx = base_vocab.index('<BOS>')
+vocab_eos_idx = base_vocab.index('<EOS>')
 
 def load_nav_graphs(scans):
     ''' Load connectivity graph for each scan '''
@@ -66,10 +68,11 @@ class Tokenizer(object):
             for i,word in enumerate(vocab):
                 self.word_to_index[word] = i
 
-    def split_sentence(self, sentence):
+    @staticmethod
+    def split_sentence(sentence):
         ''' Break sentence into a list of words and punctuation '''
         toks = []
-        for word in [s.strip().lower() for s in self.SENTENCE_SPLIT_REGEX.split(sentence.strip()) if len(s.strip()) > 0]:
+        for word in [s.strip().lower() for s in Tokenizer.SENTENCE_SPLIT_REGEX.split(sentence.strip()) if len(s.strip()) > 0]:
             # Break up any words containing punctuation only, e.g. '!?', unless it is multiple full stops e.g. '..'
             if all(c in string.punctuation for c in word) and not all(c in '.' for c in word):
                 toks += list(word)
@@ -81,7 +84,7 @@ class Tokenizer(object):
         if len(self.word_to_index) == 0:
             sys.exit('Tokenizer has no vocab')
         encoding = []
-        for word in self.split_sentence(sentence):
+        for word in Tokenizer.split_sentence(sentence):
             if word in self.word_to_index:
                 encoding.append(self.word_to_index[word])
             else:
@@ -93,24 +96,25 @@ class Tokenizer(object):
         arr = np.array(encoding[:self.encoding_length])
         return arr, min(self.encoding_length, utterance_length)
 
-    def decode_sentence(self, encoding):
+    def decode_sentence(self, encoding, break_on_eos=False, join=True):
         sentence = []
         for ix in encoding:
-            if ix == self.word_to_index['<PAD>']:
+            if ix == (self.word_to_index['<EOS>']  if break_on_eos else self.word_to_index['<PAD>']):
                 break
             else:
                 sentence.append(self.vocab[ix])
-        return " ".join(sentence)
+        if join:
+            return " ".join(sentence)
+        return sentence
 
 
 def build_vocab(splits=['train'], min_count=5, start_vocab=base_vocab):
     ''' Build a vocab, starting with base vocab containing a few useful tokens. '''
     count = Counter()
-    t = Tokenizer()
     data = load_datasets(splits)
     for item in data:
         for instr in item['instructions']:
-            count.update(t.split_sentence(instr))
+            count.update(Tokenizer.split_sentence(instr))
     vocab = list(start_vocab)
     for word,num in count.most_common():
         if num >= min_count:

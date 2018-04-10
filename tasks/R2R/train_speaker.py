@@ -14,21 +14,21 @@ import argparse
 
 import utils
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,vocab_padding_idx,timeSince, try_cuda
-from env import R2RBatch, ImageFeatures
+from env import R2RBatch, ImageFeatures, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX
 import model
-from model import EncoderLSTM, AttnDecoderLSTM
-from follower import Seq2SeqAgent
-import eval
+from model import SpeakerEncoderLSTM, SpeakerDecoderLSTM
+from speaker import Seq2SeqSpeaker
+import eval_speaker
 
 
 TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
 TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
-RESULT_DIR = 'tasks/R2R/results/'
-SNAPSHOT_DIR = 'tasks/R2R/snapshots/'
-PLOT_DIR = 'tasks/R2R/plots/'
+RESULT_DIR = 'tasks/R2R/speaker/results/'
+SNAPSHOT_DIR = 'tasks/R2R/speaker/snapshots/'
+PLOT_DIR = 'tasks/R2R/speaker/plots/'
 
 # TODO: how much is this truncating instructions?
-MAX_INPUT_LENGTH = 80
+MAX_INSTRUCTION_LENGTH = 80
 
 batch_size = 100
 max_episode_len = 20
@@ -37,7 +37,7 @@ action_embedding_size = 32
 hidden_size = 512
 bidirectional = False
 dropout_ratio = 0.5
-feedback_method = 'sample' # teacher or sample
+feedback_method = 'teacher' # teacher or sample
 learning_rate = 0.0001
 weight_decay = 0.0005
 n_iters = 5000 if feedback_method == 'teacher' else 20000
@@ -46,7 +46,7 @@ log_every=100
 #log_every=20
 
 def get_model_prefix(args):
-    model_prefix = 'seq2seq_%s_imagenet' % (feedback_method)
+    model_prefix = 'speaker_%s_imagenet' % (feedback_method)
     model_prefix = model_prefix + "_" + args.image_feature_type
     return model_prefix
 
@@ -60,7 +60,7 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_e
     if val_envs is None:
         val_envs = {}
 
-    agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
+    agent = Seq2SeqSpeaker(train_env, "", encoder, decoder, MAX_INSTRUCTION_LENGTH)
     print('Training with %s feedback' % feedback_method)
     encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
     decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate, weight_decay=weight_decay) 
@@ -95,16 +95,14 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_e
             # Get validation distance from goal under test evaluation conditions
             agent.test(use_dropout=False, feedback='argmax')
             agent.write_results()
-            score_summary, _ = evaluator.score_file(agent.results_path)
-
-            # TODO: testing code, remove
-            score_summary_direct, _ = evaluator.score_results(agent.results)
-            assert score_summary == score_summary_direct
+            print("evaluating on {}".format(env_name))
+            score_summary = evaluator.score_file(agent.results_path, verbose=True)
+            print()
 
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
             for metric,val in score_summary.items():
                 data_log['%s %s' % (env_name,metric)].append(val)
-                if metric in ['success_rate']:
+                if metric in ['bleu', 'unpenalized_bleu']:
                     loss_str += ', %s: %.3f' % (metric, val)
 
         agent.env = train_env
@@ -133,37 +131,27 @@ def setup():
         write_vocab(build_vocab(splits=['train','val_seen','val_unseen']), TRAINVAL_VOCAB)
 
 
-def make_image_attention_layer(args):
-    if args.image_feature_type != 'attention':
-        return None
-    image_attention_size = args.image_attention_size or hidden_size
-    if args.image_attention_type == 'feedforward':
-        return model.FeedforwardImageAttention(FEATURE_SIZE, hidden_size, image_attention_size)
-    elif args.image_attention_type == 'multiplicative':
-        return model.MultiplicativeImageAttention(FEATURE_SIZE, hidden_size, image_attention_size)
-
-
 def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     setup()
     image_features = ImageFeatures.from_args(args)
     vocab = read_vocab(train_vocab_path)
-    tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
+    tok = Tokenizer(vocab=vocab, encoding_length=MAX_INSTRUCTION_LENGTH)
     train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
-    encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, vocab_padding_idx,
-                                   dropout_ratio, bidirectional=bidirectional))
-    decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
-                                       action_embedding_size, hidden_size, dropout_ratio,
-                                       ablate_image_features=image_features.image_feature_type == "none",
-                                       image_attention_layer=make_image_attention_layer(args)))
-    test_envs = {split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
-                for split in test_splits}
+    encoder = try_cuda(SpeakerEncoderLSTM(len(FOLLOWER_ENV_ACTIONS), action_embedding_size, FEATURE_SIZE,
+                                          enc_hidden_size, IGNORE_ACTION_INDEX, dropout_ratio, bidirectional=bidirectional))
+    decoder = try_cuda(SpeakerDecoderLSTM(len(vocab), word_embedding_size, hidden_size, dropout_ratio))
+
+    test_envs = {
+        split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval_speaker.SpeakerEvaluation([split]))
+        for split in test_splits
+    }
     return train_env, test_envs, encoder, decoder
 
 def train_val(args):
     ''' Train on the training set, and validate on seen and unseen splits. '''
-    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['val_seen', 'val_unseen'])
+    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['train_subset', 'val_seen', 'val_unseen'])
     train(args, train_env, encoder, decoder, n_iters, val_envs=val_envs)
 
 def test_submission(args):
@@ -173,7 +161,7 @@ def test_submission(args):
 
     train(args, train_env, encoder, decoder, n_iters)
 
-    agent = Seq2SeqAgent(test_env, "", encoder, decoder, max_episode_len)
+    agent = Seq2SeqSpeaker(test_env, "", encoder, decoder, MAX_INSTRUCTION_LENGTH)
     agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
     agent.test(use_dropout=False, feedback='argmax')
     agent.write_results()

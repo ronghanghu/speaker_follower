@@ -1,22 +1,19 @@
 ''' Agents: stop/random/shortest/seq2seq  '''
 
 import json
-import os
 import sys
 import numpy as np
 import random
-import time
+from collections import namedtuple
 
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
-from torch import optim
 import torch.nn.functional as F
 
-from env import R2RBatch
-from utils import padding_idx, flatten, structured_map, try_cuda
+from utils import vocab_padding_idx, flatten, structured_map, try_cuda
 
-from collections import namedtuple
+from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, index_action_tuple
 
 InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, action_count, score")
 
@@ -31,6 +28,20 @@ def backchain_inference_states(last_inference_state):
         actions.append(inf_state.last_action)
         inf_state = inf_state.prev_inference_state
     return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:] # exclude start action
+
+def process_instruction_batch(obs, beamed=False):
+    seq_tensor = np.array([ob['instr_encoding'] for ob in (flatten(obs) if beamed else obs)])
+    seq_lengths = np.argmax(seq_tensor == vocab_padding_idx, axis=1)
+    seq_lengths[seq_lengths == 0] = seq_tensor.shape[1] # Full length
+
+    seq_tensor = torch.from_numpy(seq_tensor)
+    seq_lengths = torch.from_numpy(seq_lengths)
+
+    mask = (seq_tensor == vocab_padding_idx)[:, :seq_lengths[0]]
+
+    return try_cuda(Variable(seq_tensor, requires_grad=False).long()), \
+           try_cuda(mask.byte()), \
+           list(seq_lengths)
 
 class BaseAgent(object):
     ''' Base class for an R2R agent to generate and save trajectories. '''
@@ -147,49 +158,30 @@ class RandomAgent(BaseAgent):
                     traj[i]['trajectory'].append(path_element_from_observation(ob))
         return traj
 
-
 class ShortestAgent(BaseAgent):
     ''' An agent that always takes the shortest path to goal. '''
 
     def rollout(self):
         world_states = self.env.reset()
-        obs = self.env.observe(world_states)
-        traj = [{
-            'instr_id': ob['instr_id'],
-            'trajectory': [path_element_from_observation(ob)]
-        } for ob in obs]
-        ended = np.array([False] * len(obs))
-        while True:
-            actions = [ob['teacher'] for ob in obs]
-            world_states = self.env.step(world_states, actions)
-            obs = self.env.observe(world_states)
-            for i,a in enumerate(actions):
-                if a == (0, 0, 0):
-                    ended[i] = True
-            for i,ob in enumerate(obs):
-                if not ended[i]:
-                    traj[i]['trajectory'].append(path_element_from_observation(ob))
-            if ended.all():
-                break
-        return traj
+        #obs = self.env.observe(world_states)
+        all_obs, all_actions = self.env.shortest_paths_to_goals(world_states)
+        return [
+            {
+                'instr_id': obs[0]['instr_id'],
+                # end state will appear twice because stop action is a no-op, so exclude it
+                'trajectory': [path_element_from_observation(ob) for ob in obs[:-1]]
+            }
+            for obs in all_obs
+        ]
 
 class Seq2SeqAgent(BaseAgent):
     ''' An agent based on an LSTM seq2seq model with attention. '''
 
     # For now, the agent can't pick which forward move to make - just the one in the middle
-    model_actions = ['left', 'right', 'up', 'down', 'forward', '<end>', '<start>', '<ignore>']
-    env_actions = [
-      (0,-1, 0), # left
-      (0, 1, 0), # right
-      (0, 0, 1), # up
-      (0, 0,-1), # down
-      (1, 0, 0), # forward
-      (0, 0, 0), # <end>
-      (0, 0, 0), # <start>
-      (0, 0, 0)  # <ignore>
-    ]
+    model_actions = FOLLOWER_MODEL_ACTIONS
+    env_actions = FOLLOWER_ENV_ACTIONS
     start_index = model_actions.index('<start>')
-    ignore_index = model_actions.index('<ignore>')
+    ignore_index = IGNORE_ACTION_INDEX
     forward_index = model_actions.index('forward')
     end_index = model_actions.index('<end>')
     feedback_options = ['teacher', 'argmax', 'sample']
@@ -211,25 +203,6 @@ class Seq2SeqAgent(BaseAgent):
     def n_outputs():
         return len(Seq2SeqAgent.model_actions)-2 # Model doesn't output start or ignore
 
-    def _proc_batch(self, obs, beamed=False):
-        ''' Extract instructions from a list of observations and sort by descending
-            sequence length (to enable PyTorch packing). '''
-        seq_tensor = np.array([ob['instr_encoding'] for ob in (flatten(obs) if beamed else obs)])
-        seq_lengths = np.argmax(seq_tensor == padding_idx, axis=1)
-        seq_lengths[seq_lengths == 0] = seq_tensor.shape[1] # Full length
-
-        seq_tensor = torch.from_numpy(seq_tensor)
-        seq_lengths = torch.from_numpy(seq_lengths)
-
-        # Sort sequences by lengths
-        # seq_lengths, perm_idx = seq_lengths.sort(0, True)
-        # sorted_tensor = seq_tensor[perm_idx]
-        mask = (seq_tensor == padding_idx)[:,:seq_lengths[0]]
-
-        return try_cuda(Variable(seq_tensor, requires_grad=False).long()), \
-               try_cuda(mask.byte()), \
-               list(seq_lengths)
-
     def _feature_variable(self, obs, beamed=False):
         ''' Extract precomputed features into variable. '''
         features = np.stack([ob['feature'] for ob in (flatten(obs) if beamed else obs)])
@@ -240,23 +213,16 @@ class Seq2SeqAgent(BaseAgent):
         a = torch.LongTensor(len(obs))
         for i,ob in enumerate(obs):
             # Supervised teacher only moves one axis at a time
-            ix,heading_chg,elevation_chg = ob['teacher']
-            if heading_chg > 0:
-                a[i] = self.model_actions.index('right')
-            elif heading_chg < 0:
-                a[i] = self.model_actions.index('left')
-            elif elevation_chg > 0:
-                a[i] = self.model_actions.index('up')
-            elif elevation_chg < 0:
-                a[i] = self.model_actions.index('down')
-            elif ix > 0:
-                a[i] = self.model_actions.index('forward')
-            elif ended[i]:
-                a[i] = self.model_actions.index('<ignore>')
-            else:
-                a[i] = self.model_actions.index('<end>')
+            action_tuple = ob['teacher']
+            index = index_action_tuple(action_tuple)
+            if index == self.end_index and ended[i]:
+                index = self.ignore_index
+            a[i] = index
         return try_cuda(Variable(a, requires_grad=False))
 
+
+    def _proc_batch(self, obs, beamed=False):
+        return process_instruction_batch(obs, beamed)
 
     def rollout(self):
         if self.beam_size == 1:
@@ -265,7 +231,6 @@ class Seq2SeqAgent(BaseAgent):
             assert self.beam_size >= 1
             beams = self.beam_search(self.beam_size)
             return [beam[0] for beam in beams]
-
 
     def _rollout_with_loss(self):
         world_states = self.env.reset(sort=True)
@@ -351,7 +316,9 @@ class Seq2SeqAgent(BaseAgent):
             if ended.all():
                 break
 
-        self.losses.append(self.loss.data[0] / self.episode_len)
+        #self.losses.append(self.loss.data[0] / self.episode_len)
+        # shouldn't divide by the episode length because of masking
+        self.losses.append(self.loss.data[0])
         return traj
 
     def beam_search(self, beam_size, load_next_minibatch=True):

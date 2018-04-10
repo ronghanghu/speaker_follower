@@ -1,8 +1,6 @@
 ''' Evaluation of agent trajectories '''
 
 import json
-import os
-import sys
 from collections import defaultdict
 import networkx as nx
 import numpy as np
@@ -12,10 +10,9 @@ pp = pprint.PrettyPrinter(indent=4)
 from env import R2RBatch, ImageFeatures
 import utils
 from utils import load_datasets, load_nav_graphs
-from agent import BaseAgent, StopAgent, RandomAgent, ShortestAgent
+from follower import BaseAgent
 
-import argparse
-
+from train import RESULT_DIR
 
 class Evaluation(object):
     ''' Results submission format:  [{'instr_id': string, 'trajectory':[(viewpoint_id, heading_rads, elevation_rads),] } ] '''
@@ -107,8 +104,6 @@ class Evaluation(object):
         with open(output_file) as f:
             return self.score_results(json.load(f))
 
-
-RESULT_DIR = 'tasks/R2R/results/'
 
 def eval_simple_agents(args):
     ''' Run simple baselines on each split. '''

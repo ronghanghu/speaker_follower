@@ -16,9 +16,27 @@ import time
 
 from collections import namedtuple
 
-from utils import load_datasets, load_nav_graphs, structured_map, padding_idx
+from utils import load_datasets, load_nav_graphs, structured_map, vocab_padding_idx
 
 csv.field_size_limit(sys.maxsize)
+
+FOLLOWER_MODEL_ACTIONS = ['left', 'right', 'up', 'down', 'forward', '<end>', '<start>', '<ignore>']
+
+END_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<end>")
+IGNORE_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<ignore>")
+
+FOLLOWER_ENV_ACTIONS = [
+    (0,-1, 0), # left
+    (0, 1, 0), # right
+    (0, 0, 1), # up
+    (0, 0,-1), # down
+    (1, 0, 0), # forward
+    (0, 0, 0), # <end>
+    (0, 0, 0), # <start>
+    (0, 0, 0)  # <ignore>
+]
+
+assert len(FOLLOWER_MODEL_ACTIONS) == len(FOLLOWER_ENV_ACTIONS)
 
 WorldState = namedtuple("WorldState", ["scanId", "viewpointId", "heading", "elevation"])
 
@@ -31,6 +49,49 @@ def get_world_state(sim):
                       viewpointId=state.location.viewpointId,
                       heading=state.heading,
                       elevation=state.elevation)
+
+def make_sim(image_w, image_h, vfov):
+    sim = MatterSim.Simulator()
+    sim.setRenderingEnabled(False)
+    sim.setDiscretizedViewingAngles(True)
+    sim.setCameraResolution(image_w, image_h)
+    sim.setCameraVFOV(math.radians(vfov))
+    sim.init()
+    return sim
+
+# def encode_action_sequence(action_tuples):
+#     encoded = []
+#     reached_end = False
+#     if action_tuples[0] == (0, 0, 0):
+#         # this method can't handle a <start> symbol
+#         assert all(t == (0, 0, 0) for t in action_tuples)
+#     for tpl in action_tuples:
+#         if tpl == (0, 0, 0):
+#             if reached_end:
+#                 ix = IGNORE_ACTION_INDEX
+#             else:
+#                 ix = END_ACTION_INDEX
+#                 reached_end = True
+#         else:
+#             ix = FOLLOWER_ENV_ACTIONS.index(tpl)
+#         encoded.append(ix)
+#     return encoded
+
+def index_action_tuple(action_tuple):
+    ix, heading_chg, elevation_chg = action_tuple
+    if heading_chg > 0:
+        return FOLLOWER_MODEL_ACTIONS.index('right')
+    elif heading_chg < 0:
+        return FOLLOWER_MODEL_ACTIONS.index('left')
+    elif elevation_chg > 0:
+        return FOLLOWER_MODEL_ACTIONS.index('up')
+    elif elevation_chg < 0:
+        return FOLLOWER_MODEL_ACTIONS.index('down')
+    elif ix > 0:
+        return FOLLOWER_MODEL_ACTIONS.index('forward')
+    else:
+        return FOLLOWER_MODEL_ACTIONS.index('<end>')
+
 
 class ImageFeatures(object):
     num_views = 36
@@ -98,8 +159,6 @@ class ImageFeatures(object):
             assert self.image_feature_type == 'none'
             return self.features
 
-
-
 class EnvBatch():
     ''' A simple wrapper for a batch of MatterSim environments, 
         using discretized viewpoints and pretrained features '''
@@ -112,12 +171,7 @@ class EnvBatch():
         for i in range(batch_size):
             beam = []
             for j in range(beam_size):
-                sim = MatterSim.Simulator()
-                sim.setRenderingEnabled(False)
-                sim.setDiscretizedViewingAngles(True)
-                sim.setCameraResolution(self.image_features.image_w, self.image_features.image_h)
-                sim.setCameraVFOV(math.radians(self.image_features.vfov))
-                sim.init()
+                sim = make_sim(self.image_features.image_w, self.image_features.image_h, self.image_features.vfov)
                 beam.append(sim)
             self.sims.append(beam)
 
@@ -195,7 +249,10 @@ class R2RBatch():
                 new_item['instr_id'] = '%s_%d' % (item['path_id'], j)
                 new_item['instructions'] = instr
                 if tokenizer:
+                    self.tokenizer = tokenizer
                     new_item['instr_encoding'], new_item['instr_length'] = tokenizer.encode_sentence(instr)
+                else:
+                    self.tokenizer = None
                 self.data.append(new_item)
         self.scans = set(self.scans)
         self.splits = splits
@@ -229,7 +286,7 @@ class R2RBatch():
         for scan,G in self.graphs.items(): # compute all shortest paths
             self.distances[scan] = dict(nx.all_pairs_dijkstra_path_length(G))
 
-    def _next_minibatch(self, sort):
+    def _next_minibatch(self, sort_instr_length):
         batch = self.data[self.ix:self.ix+self.batch_size]
         if len(batch) < self.batch_size:
             random.shuffle(self.data)
@@ -237,7 +294,7 @@ class R2RBatch():
             batch += self.data[:self.ix]
         else:
             self.ix += self.batch_size
-        if sort:
+        if sort_instr_length:
             batch = sorted(batch, key=lambda item: item['instr_length'], reverse=True)
         self.batch = batch
 
@@ -282,7 +339,7 @@ class R2RBatch():
             return (0,-1, 0) # Turn left
         return (0, 1, 0) # Turn right
 
-    def observe(self, world_states, beamed=False):
+    def observe(self, world_states, beamed=False, include_teacher=True):
         #start_time = time.time()
         obs = []
         for i,states_beam in enumerate(self.env.getStates(world_states, beamed=beamed)):
@@ -302,8 +359,9 @@ class R2RBatch():
                     'step' : state.step,
                     'navigableLocations' : state.navigableLocations,
                     'instructions' : item['instructions'],
-                    'teacher' : self._shortest_path_action(state, item['path'][-1]),
                 }
+                if include_teacher:
+                    ob['teacher'] = self._shortest_path_action(state, item['path'][-1])
                 if 'instr_encoding' in item:
                     ob['instr_encoding'] = item['instr_encoding']
                 if 'instr_length' in item:
@@ -332,3 +390,30 @@ class R2RBatch():
     def step(self, world_states, actions, beamed=False):
         ''' Take action (same interface as makeActions) '''
         return self.env.makeActions(world_states, actions, beamed=beamed)
+
+    def shortest_paths_to_goals(self, starting_world_states):
+        world_states = starting_world_states
+        obs = self.observe(world_states)
+
+        all_obs = []
+        all_actions = []
+        for ob in obs:
+            all_obs.append([ob])
+            all_actions.append([])
+
+        ended = np.array([False] * len(obs))
+        while True:
+            actions = [ob['teacher'] for ob in obs]
+            world_states = self.step(world_states, actions)
+            obs = self.observe(world_states)
+            for i,ob in enumerate(obs):
+                if not ended[i]:
+                    all_obs[i].append(ob)
+            for i,a in enumerate(actions):
+                if not ended[i]:
+                    all_actions[i].append(a)
+                    if a == (0, 0, 0):
+                        ended[i] = True
+            if ended.all():
+                break
+        return all_obs, all_actions

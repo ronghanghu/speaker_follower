@@ -1,7 +1,7 @@
 import argparse
 import utils
 import train
-from agent import Seq2SeqAgent
+from follower import Seq2SeqAgent
 
 def validate_entry_point(args):
     train_env, val_envs, encoder, decoder = train.make_env_and_models(args, train.TRAIN_VOCAB, ['train'], ['train_subset', 'val_seen', 'val_unseen'])
