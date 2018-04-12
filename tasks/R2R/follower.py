@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 
-from utils import vocab_padding_idx, flatten, structured_map, try_cuda
+from utils import vocab_pad_idx, flatten, structured_map, try_cuda
 
 from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, index_action_tuple
 
@@ -29,15 +29,18 @@ def backchain_inference_states(last_inference_state):
         inf_state = inf_state.prev_inference_state
     return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:] # exclude start action
 
-def process_instruction_batch(obs, beamed=False):
-    seq_tensor = np.array([ob['instr_encoding'] for ob in (flatten(obs) if beamed else obs)])
-    seq_lengths = np.argmax(seq_tensor == vocab_padding_idx, axis=1)
+def batch_instructions_from_encoded(encoded_instructions):
+    # encoded_instructions: list of padded lists of token indices (must all be the same length, and padded with vocab_pad_idx at the end
+    seq_tensor = np.array(encoded_instructions)
+    # make sure pad does not start any sentence
+    assert not any(seq_tensor[:,0] == vocab_pad_idx)
+    seq_lengths = np.argmax(seq_tensor == vocab_pad_idx, axis=1)
     seq_lengths[seq_lengths == 0] = seq_tensor.shape[1] # Full length
 
     seq_tensor = torch.from_numpy(seq_tensor)
     seq_lengths = torch.from_numpy(seq_lengths)
 
-    mask = (seq_tensor == vocab_padding_idx)[:, :seq_lengths[0]]
+    mask = (seq_tensor == vocab_pad_idx)[:, :seq_lengths[0]]
 
     return try_cuda(Variable(seq_tensor, requires_grad=False).long()), \
            try_cuda(mask.byte()), \
@@ -107,6 +110,7 @@ class BaseAgent(object):
         # if self.feedback == 'argmax':
         #     print("avg rollout score: ", np.mean(rollout_scores))
         #     print("avg beam 10 score: ", np.mean(beam_10_scores))
+        return self.results
 
 def path_element_from_observation(ob):
     return (ob['viewpoint'], ob['heading'], ob['elevation'])
@@ -222,7 +226,8 @@ class Seq2SeqAgent(BaseAgent):
 
 
     def _proc_batch(self, obs, beamed=False):
-        return process_instruction_batch(obs, beamed)
+        encoded_instructions = [ob['instr_encoding'] for ob in (flatten(obs) if beamed else obs)]
+        return batch_instructions_from_encoded(encoded_instructions)
 
     def rollout(self):
         if self.beam_size == 1:
@@ -470,13 +475,19 @@ class Seq2SeqAgent(BaseAgent):
                 trajectory = [path_element_from_observation(ob) for ob in path_observations]
                 this_trajs.append({
                     'instr_id': path_observations[0]['instr_id'],
+                    'instr_encoding': path_observations[0]['instr_encoding'],
                     'trajectory': trajectory,
-                    # 'observations': path_observations,
+                    'observations': path_observations,
                     'actions': path_actions,
                     'score': inf_state.score,
                 })
             trajs.append(this_trajs)
         return trajs
+
+    def set_beam_size(self, beam_size):
+        if self.env.beam_size < beam_size:
+            self.env.set_beam_size(beam_size)
+        self.beam_size = beam_size
 
     def test(self, use_dropout=False, feedback='argmax', allow_cheat=False, beam_size=1):
         ''' Evaluate once on each instruction in the current environment '''
@@ -489,9 +500,7 @@ class Seq2SeqAgent(BaseAgent):
         else:
             self.encoder.eval()
             self.decoder.eval()
-        if self.env.beam_size < beam_size:
-            self.env.set_beam_size(beam_size)
-        self.beam_size = beam_size
+        self.set_beam_size(beam_size)
         super(Seq2SeqAgent, self).test()
 
     def train(self, encoder_optimizer, decoder_optimizer, n_iters, feedback='teacher'):
@@ -515,12 +524,17 @@ class Seq2SeqAgent(BaseAgent):
             encoder_optimizer.step()
             decoder_optimizer.step()
 
-    def save(self, encoder_path, decoder_path):
+    def _encoder_and_decoder_paths(self, base_path):
+        return base_path + "_enc", base_path + "_dec"
+
+    def save(self, path):
         ''' Snapshot models '''
+        encoder_path, decoder_path = self._encoder_and_decoder_paths(path)
         torch.save(self.encoder.state_dict(), encoder_path)
         torch.save(self.decoder.state_dict(), decoder_path)
 
-    def load(self, encoder_path, decoder_path):
+    def load(self, path):
         ''' Loads parameters (but not training state) '''
+        encoder_path, decoder_path = self._encoder_and_decoder_paths(path)
         self.encoder.load_state_dict(torch.load(encoder_path))
         self.decoder.load_state_dict(torch.load(decoder_path))

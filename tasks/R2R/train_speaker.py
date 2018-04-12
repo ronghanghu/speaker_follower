@@ -6,6 +6,7 @@ from torch import optim
 import torch.nn.functional as F
 
 import os
+import os.path
 import time
 import numpy as np
 import pandas as pd
@@ -13,16 +14,15 @@ from collections import defaultdict
 import argparse
 
 import utils
-from utils import read_vocab,write_vocab,build_vocab,Tokenizer,vocab_padding_idx,timeSince, try_cuda
+from utils import read_vocab,write_vocab,build_vocab,Tokenizer,vocab_pad_idx,timeSince, try_cuda
 from env import R2RBatch, ImageFeatures, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX
 import model
 from model import SpeakerEncoderLSTM, SpeakerDecoderLSTM
 from speaker import Seq2SeqSpeaker
 import eval_speaker
 
+from vocab import TRAIN_VOCAB, TRAINVAL_VOCAB
 
-TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
-TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
 RESULT_DIR = 'tasks/R2R/speaker/results/'
 SNAPSHOT_DIR = 'tasks/R2R/speaker/snapshots/'
 PLOT_DIR = 'tasks/R2R/speaker/plots/'
@@ -40,7 +40,8 @@ dropout_ratio = 0.5
 feedback_method = 'teacher' # teacher or sample
 learning_rate = 0.0001
 weight_decay = 0.0005
-n_iters = 5000 if feedback_method == 'teacher' else 20000
+#n_iters = 5000 if feedback_method == 'teacher' else 20000
+n_iters = 20000
 FEATURE_SIZE = 2048
 log_every=100
 #log_every=20
@@ -54,21 +55,21 @@ def eval_model(agent, results_path, use_dropout, feedback, allow_cheat=False):
     agent.results_path = results_path
     agent.test(use_dropout=use_dropout, feedback=feedback, allow_cheat=allow_cheat)
 
-def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_envs=None):
+def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
     ''' Train on training set, validating on both seen and unseen. '''
 
     if val_envs is None:
         val_envs = {}
 
-    agent = Seq2SeqSpeaker(train_env, "", encoder, decoder, MAX_INSTRUCTION_LENGTH)
     print('Training with %s feedback' % feedback_method)
-    encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate, weight_decay=weight_decay) 
+    encoder_optimizer = optim.Adam(agent.encoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    decoder_optimizer = optim.Adam(agent.decoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     data_log = defaultdict(list)
     start = time.time()
-   
+
     for idx in range(0, n_iters, log_every):
+        agent.env = train_env
 
         interval = min(log_every,n_iters-idx)
         iter = idx + interval
@@ -93,10 +94,10 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_e
 
             agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), env_name, iter)
             # Get validation distance from goal under test evaluation conditions
-            agent.test(use_dropout=False, feedback='argmax')
+            results = agent.test(use_dropout=False, feedback='argmax')
             agent.write_results()
             print("evaluating on {}".format(env_name))
-            score_summary = evaluator.score_file(agent.results_path, verbose=True)
+            score_summary = evaluator.score_results(results, verbose=True)
             print()
 
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
@@ -104,8 +105,6 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_e
                 data_log['%s %s' % (env_name,metric)].append(val)
                 if metric in ['bleu', 'unpenalized_bleu']:
                     loss_str += ', %s: %.3f' % (metric, val)
-
-        agent.env = train_env
 
         print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
                                              iter, float(iter)/n_iters*100, loss_str)))
@@ -116,10 +115,8 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_e
         df.to_csv(df_path)
         
         split_string = "-".join(train_env.splits)
-        enc_path = '%s%s_%s_enc_iter_%d' % (SNAPSHOT_DIR, get_model_prefix(args), split_string, iter)
-        dec_path = '%s%s_%s_dec_iter_%d' % (SNAPSHOT_DIR, get_model_prefix(args), split_string, iter)
-        agent.save(enc_path, dec_path)
-
+        path = os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
+        agent.save(path)
 
 def setup():
     torch.manual_seed(1)
@@ -129,7 +126,6 @@ def setup():
         write_vocab(build_vocab(splits=['train']), TRAIN_VOCAB)
     if not os.path.exists(TRAINVAL_VOCAB):
         write_vocab(build_vocab(splits=['train','val_seen','val_unseen']), TRAINVAL_VOCAB)
-
 
 def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     setup()
@@ -149,23 +145,32 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     }
     return train_env, test_envs, encoder, decoder
 
+def train_setup(args):
+    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['train_subset', 'val_seen', 'val_unseen'])
+    agent = Seq2SeqSpeaker(train_env, "", encoder, decoder, MAX_INSTRUCTION_LENGTH)
+    return agent, train_env, val_envs
+
+def test_setup(args):
+    train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
+    agent = Seq2SeqSpeaker(None, "", encoder, decoder, MAX_INSTRUCTION_LENGTH)
+    return agent, train_env, test_envs
+
 def train_val(args):
     ''' Train on the training set, and validate on seen and unseen splits. '''
-    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['train_subset', 'val_seen', 'val_unseen'])
-    train(args, train_env, encoder, decoder, n_iters, val_envs=val_envs)
+    agent, train_env, val_envs = train_setup(args)
+    train(args, train_env, agent, n_iters, val_envs=val_envs)
 
 def test_submission(args):
     ''' Train on combined training and validation sets, and generate test submission. '''
-    train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
+    agent, train_env, test_envs = test_setup(args)
+    train(args, train_env, agent, n_iters)
+
     test_env = test_envs['test']
+    agent.env = test_env
 
-    train(args, train_env, encoder, decoder, n_iters)
-
-    agent = Seq2SeqSpeaker(test_env, "", encoder, decoder, MAX_INSTRUCTION_LENGTH)
     agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
     agent.test(use_dropout=False, feedback='argmax')
     agent.write_results()
-
 
 def make_arg_parser():
     parser = argparse.ArgumentParser()
@@ -180,4 +185,3 @@ def make_arg_parser():
 if __name__ == "__main__":
     utils.run(make_arg_parser(), train_val)
     #test_submission()
-

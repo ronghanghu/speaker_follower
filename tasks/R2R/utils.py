@@ -11,13 +11,16 @@ from collections import Counter
 import numpy as np
 import networkx as nx
 import subprocess
+import itertools
 
 
 # padding, unknown word, end of sentence
 base_vocab = ['<PAD>', '<UNK>', '<EOS>', '<BOS>']
-vocab_padding_idx = base_vocab.index('<PAD>')
-vocab_bos_idx = base_vocab.index('<BOS>')
+
+vocab_pad_idx = base_vocab.index('<PAD>')
+vocab_unk_idx = base_vocab.index('<UNK>')
 vocab_eos_idx = base_vocab.index('<EOS>')
+vocab_bos_idx = base_vocab.index('<BOS>')
 
 def load_nav_graphs(scans):
     ''' Load connectivity graph for each scan '''
@@ -88,18 +91,18 @@ class Tokenizer(object):
             if word in self.word_to_index:
                 encoding.append(self.word_to_index[word])
             else:
-                encoding.append(self.word_to_index['<UNK>'])
-        encoding.append(self.word_to_index['<EOS>'])
+                encoding.append(vocab_unk_idx)
+        encoding.append(vocab_eos_idx)
         utterance_length = len(encoding)
         if utterance_length < self.encoding_length:
-            encoding += [self.word_to_index['<PAD>']] * (self.encoding_length-len(encoding))
+            encoding += [vocab_pad_idx] * (self.encoding_length - len(encoding))
         arr = np.array(encoding[:self.encoding_length])
         return arr, min(self.encoding_length, utterance_length)
 
     def decode_sentence(self, encoding, break_on_eos=False, join=True):
         sentence = []
         for ix in encoding:
-            if ix == (self.word_to_index['<EOS>']  if break_on_eos else self.word_to_index['<PAD>']):
+            if ix == (vocab_eos_idx  if break_on_eos else vocab_pad_idx):
                 break
             else:
                 sentence.append(self.vocab[ix])
@@ -166,6 +169,9 @@ def structured_map(function, *args, nested=False):
 
 def flatten(lol):
     return [l for lst in lol for l in lst]
+
+def all_equal(lst):
+    return all(x == lst[0] for x in lst[1:])
 
 def try_cuda(pytorch_obj):
     import torch.cuda

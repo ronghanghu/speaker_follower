@@ -9,9 +9,6 @@ from utils import load_datasets, Tokenizer
 import numpy as np
 from bleu import multi_bleu
 
-
-from train_speaker import RESULT_DIR
-
 class SpeakerEvaluation(object):
     ''' Results submission format:  [{'instr_id': string, 'trajectory':[(viewpoint_id, heading_rads, elevation_rads),] } ] '''
 
@@ -71,11 +68,12 @@ class SpeakerEvaluation(object):
         model_score = np.mean(model_scores)
         bleu, unpenalized_bleu = multi_bleu(all_refs, all_hyps)
 
-        return {
+        score_summary = {
             'model_score': model_score,
             'bleu': bleu,
             'unpenalized_bleu': unpenalized_bleu,
         }
+        return score_summary
 
     def score_file(self, output_file, verbose=False):
         ''' Evaluate each agent trajectory based on how close it got to the goal location '''
@@ -84,9 +82,10 @@ class SpeakerEvaluation(object):
 
 
 def eval_seq2seq():
+    import train_speaker
     outfiles = [
-        # RESULT_DIR + 'seq2seq_teacher_imagenet_%s_iter_5000.json',
-        # RESULT_DIR + 'seq2seq_sample_imagenet_%s_iter_20000.json'
+        # train_speaker.RESULT_DIR + 'seq2seq_teacher_imagenet_%s_iter_5000.json',
+        # train_speaker.RESULT_DIR + 'seq2seq_sample_imagenet_%s_iter_20000.json'
     ]
     for outfile in outfiles:
         for split in ['val_seen', 'val_unseen']:

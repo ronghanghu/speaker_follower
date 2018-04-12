@@ -12,7 +12,7 @@ import utils
 from utils import load_datasets, load_nav_graphs
 from follower import BaseAgent
 
-from train import RESULT_DIR
+import train
 
 class Evaluation(object):
     ''' Results submission format:  [{'instr_id': string, 'trajectory':[(viewpoint_id, heading_rads, elevation_rads),] } ] '''
@@ -113,7 +113,7 @@ def eval_simple_agents(args):
         ev = Evaluation([split])
 
         for agent_type in ['Stop', 'Shortest', 'Random']:
-            outfile = '%s%s_%s_agent.json' % (RESULT_DIR, split, agent_type.lower())
+            outfile = '%s%s_%s_agent.json' % (train.RESULT_DIR, split, agent_type.lower())
             agent = BaseAgent.get_agent(agent_type)(env, outfile)
             agent.test()
             agent.write_results()
@@ -125,8 +125,8 @@ def eval_simple_agents(args):
 def eval_seq2seq():
     ''' Eval sequence to sequence models on val splits (iteration selected from training error) '''
     outfiles = [
-        RESULT_DIR + 'seq2seq_teacher_imagenet_%s_iter_5000.json',
-        RESULT_DIR + 'seq2seq_sample_imagenet_%s_iter_20000.json'
+        train.RESULT_DIR + 'seq2seq_teacher_imagenet_%s_iter_5000.json',
+        train.RESULT_DIR + 'seq2seq_sample_imagenet_%s_iter_20000.json'
     ]
     for outfile in outfiles:
         for split in ['val_seen', 'val_unseen']:
@@ -139,9 +139,3 @@ if __name__ == '__main__':
     from train import make_arg_parser
     utils.run(make_arg_parser(), eval_simple_agents)
     #eval_seq2seq()
-
-
-
-
-
-

@@ -16,7 +16,7 @@ import time
 
 from collections import namedtuple
 
-from utils import load_datasets, load_nav_graphs, structured_map, vocab_padding_idx
+from utils import load_datasets, load_nav_graphs, structured_map, vocab_pad_idx
 
 csv.field_size_limit(sys.maxsize)
 
@@ -411,7 +411,7 @@ class R2RBatch():
                     all_obs[i].append(ob)
             for i,a in enumerate(actions):
                 if not ended[i]:
-                    all_actions[i].append(a)
+                    all_actions[i].append(index_action_tuple(a))
                     if a == (0, 0, 0):
                         ended[i] = True
             if ended.all():

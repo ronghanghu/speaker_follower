@@ -8,11 +8,11 @@ import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 
-from utils import vocab_padding_idx, vocab_bos_idx, vocab_eos_idx, flatten, try_cuda
+from utils import vocab_pad_idx, vocab_bos_idx, vocab_eos_idx, flatten, try_cuda
 
 from env import IGNORE_ACTION_INDEX, index_action_tuple
 
-from follower import process_instruction_batch
+from follower import batch_instructions_from_encoded
 
 class Seq2SeqSpeaker(object):
     feedback_options = ['teacher', 'argmax', 'sample']
@@ -34,22 +34,6 @@ class Seq2SeqSpeaker(object):
         with open(self.results_path, 'w') as f:
             json.dump(self.results, f)
 
-    def test(self):
-        self.env.reset_epoch()
-        self.losses = []
-        self.results = {}
-
-        looped = False
-        while True:
-            rollout_results = self.rollout()
-            for result in rollout_results:
-                if result['instr_id'] in self.results:
-                    looped = True
-                else:
-                    self.results[result['instr_id']] = result
-            if looped:
-                break
-
     def n_inputs(self):
         return self.decoder.vocab_size
 
@@ -61,24 +45,28 @@ class Seq2SeqSpeaker(object):
         features = np.stack([ob['feature'] for ob in (flatten(obs) if beamed else obs)])
         return try_cuda(Variable(torch.from_numpy(features), requires_grad=False))
 
-    def _proc_batch(self, starting_world_states):
-        # note: return values will be in sorted order
-        path_obs, path_actions = self.env.shortest_paths_to_goals(starting_world_states)
-        seq_lengths = [len(a) for a in path_actions]
-        max_path_length = max(seq_lengths)
-        path_obs, path_actions, seq_lengths = zip(*sorted(zip(path_obs, path_actions, seq_lengths), key=lambda p: p[2], reverse=True))
+    def _batch_observations_and_actions(self, path_obs, path_actions, encoded_instructions):
+        seq_lengths = np.array([len(a) for a in path_actions])
+        max_path_length = seq_lengths.max()
+        perm_indices = np.argsort(-seq_lengths)
+
+        #path_obs, path_actions, encoded_instructions, seq_lengths = zip(*sorted(zip(path_obs, path_actions, encoded_instructions, seq_lengths), key=lambda p: p[-1], reverse=True))
+
+        path_obs = [path_obs[i] for i in perm_indices]
+        path_actions = [path_actions[i] for i in perm_indices]
+        encoded_instructions = [encoded_instructions[i] for i in perm_indices]
+        seq_lengths = [seq_lengths[i] for i in perm_indices]
 
         for o, a in zip(path_obs, path_actions):
             assert len(o) == len(a) + 1
-
-        assert seq_lengths[0] == max_path_length
 
         batch_size = len(path_obs)
         assert batch_size == len(path_actions)
 
         batched_actions = np.full((batch_size, max_path_length), IGNORE_ACTION_INDEX, dtype='int64')
         for i, actions in enumerate(path_actions):
-            batched_actions[i,0:len(actions)] = [index_action_tuple(tpl) for tpl in actions]
+            actions = path_actions[i]
+            batched_actions[i,0:len(actions)] = actions #[index_action_tuple(tpl) for tpl in actions]
         batched_actions = torch.from_numpy(batched_actions).long()
 
         image_feature_shape = path_obs[0][0]['feature'].shape
@@ -97,12 +85,16 @@ class Seq2SeqSpeaker(object):
                try_cuda(Variable(batched_image_features, requires_grad=False)), \
                try_cuda(Variable(batched_actions, requires_grad=False)), \
                try_cuda(mask), \
-               list(seq_lengths)
+               list(seq_lengths), \
+               encoded_instructions, \
+               list(perm_indices)
 
-    def rollout(self):
-        starting_world_states = self.env.reset()
-        start_obs, batched_image_features, batched_actions, path_mask, path_lengths = self._proc_batch(starting_world_states)
-        instr_seq, instr_seq_mask, instr_seq_lengths = process_instruction_batch(start_obs, beamed=False)
+    def _rollout_with_instructions_obs_and_actions(self, path_obs, path_actions, encoded_instructions, feedback):
+        assert len(path_obs) == len(path_actions)
+        assert len(path_obs) == len(encoded_instructions)
+
+        start_obs, batched_image_features, batched_actions, path_mask, path_lengths, encoded_instructions, perm_indices = self._batch_observations_and_actions(path_obs, path_actions, encoded_instructions)
+        instr_seq, instr_seq_mask, instr_seq_lengths = batch_instructions_from_encoded(encoded_instructions)
 
         batch_size = len(start_obs)
 
@@ -110,17 +102,19 @@ class Seq2SeqSpeaker(object):
 
         w_t = try_cuda(Variable(torch.from_numpy(np.full((batch_size,), vocab_bos_idx, dtype='int64')).long(),
                                 requires_grad=False))
-        ended = np.array([False] * batch_size) # Indices match permuation of the model, not env
+        ended = np.array([False] * batch_size)
 
-        outputs = []
-        for i in range(batch_size):
-            outputs.append({
-                'instr_id': start_obs[i]['instr_id'],
+        assert len(perm_indices) == batch_size
+        outputs = [None] * batch_size
+        for perm_index, src_index in enumerate(perm_indices):
+            outputs[src_index] = {
+                'instr_id': start_obs[perm_index]['instr_id'],
                 'word_indices': [],
-            })
+            }
+        assert all(outputs)
 
         # Do a sequence rollout and calculate the loss
-        self.loss = 0
+        loss = 0
         sequence_scores = try_cuda(torch.zeros(batch_size))
         for t in range(self.instruction_len):
             h_t,c_t,alpha,logit = self.decoder(w_t.view(-1, 1), h_t, c_t, ctx, path_mask)
@@ -130,33 +124,33 @@ class Seq2SeqSpeaker(object):
             target = instr_seq[:,t].contiguous()
 
             # Determine next model inputs
-            if self.feedback == 'teacher':
+            if feedback == 'teacher':
                 w_t = target
-            elif self.feedback == 'argmax':
+            elif feedback == 'argmax':
                 _,w_t = logit.max(1)        # student forcing - argmax
                 w_t = w_t.detach()
-            elif self.feedback == 'sample':
+            elif feedback == 'sample':
                 probs = F.softmax(logit)    # sampling an action from model
                 w_t = probs.multinomial(1).detach().squeeze(-1)
             else:
                 sys.exit('Invalid feedback option')
 
             log_probs = F.log_softmax(logit, dim=1)
-            word_scores = -F.nll_loss(log_probs, w_t, ignore_index=vocab_padding_idx, reduce=False)
+            word_scores = -F.nll_loss(log_probs, w_t, ignore_index=vocab_pad_idx, reduce=False)
             sequence_scores += word_scores.data
 
-            if self.feedback == 'teacher':
-                self.loss -= torch.mean(word_scores)
+            if feedback == 'teacher':
+                loss -= torch.mean(word_scores)
             else:
-                self.loss += F.nll_loss(log_probs, target, ignore_index=vocab_padding_idx, reduce=True, size_average=True)
+                loss += F.nll_loss(log_probs, target, ignore_index=vocab_pad_idx, reduce=True, size_average=True)
 
-            for i in range(batch_size):
-                word_idx = w_t[i].data[0]
-                if not ended[i]:
-                    outputs[i]['word_indices'].append(word_idx)
-                    outputs[i]['score'] = sequence_scores[i]
+            for perm_index, src_index in enumerate(perm_indices):
+                word_idx = w_t[perm_index].data[0]
+                if not ended[perm_index]:
+                    outputs[src_index]['word_indices'].append(word_idx)
+                    outputs[src_index]['score'] = sequence_scores[perm_index]
                 if word_idx == vocab_eos_idx:
-                    ended[i] = True
+                    ended[perm_index] = True
 
             # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
 
@@ -166,8 +160,16 @@ class Seq2SeqSpeaker(object):
 
         for item in outputs:
             item['words'] = self.env.tokenizer.decode_sentence(item['word_indices'], break_on_eos=True, join=False)
+        return outputs, loss
 
-        self.losses.append(self.loss.data[0])
+    def rollout(self):
+        starting_world_states = self.env.reset()
+        path_obs, path_actions = self.env.shortest_paths_to_goals(starting_world_states)
+        encoded_instructions = [obs[0]['instr_encoding'] for obs in path_obs]
+
+        outputs, loss = self._rollout_with_instructions_obs_and_actions(path_obs, path_actions, encoded_instructions, self.feedback)
+        self.loss = loss
+        self.losses.append(loss.data[0])
         return outputs
 
     def test(self, use_dropout=False, feedback='argmax', allow_cheat=False, beam_size=1):
@@ -197,6 +199,7 @@ class Seq2SeqSpeaker(object):
                     self.results[result['instr_id']] = result
             if looped:
                 break
+        return self.results
 
     def train(self, encoder_optimizer, decoder_optimizer, n_iters, feedback='teacher'):
         ''' Train for a given number of iterations '''
@@ -219,12 +222,17 @@ class Seq2SeqSpeaker(object):
             encoder_optimizer.step()
             decoder_optimizer.step()
 
-    def save(self, encoder_path, decoder_path):
+    def _encoder_and_decoder_paths(self, base_path):
+        return base_path + "_enc", base_path + "_dec"
+
+    def save(self, path):
         ''' Snapshot models '''
+        encoder_path, decoder_path = self._encoder_and_decoder_paths(path)
         torch.save(self.encoder.state_dict(), encoder_path)
         torch.save(self.decoder.state_dict(), decoder_path)
 
-    def load(self, encoder_path, decoder_path):
+    def load(self, path):
         ''' Loads parameters (but not training state) '''
+        encoder_path, decoder_path = self._encoder_and_decoder_paths(path)
         self.encoder.load_state_dict(torch.load(encoder_path))
         self.decoder.load_state_dict(torch.load(decoder_path))

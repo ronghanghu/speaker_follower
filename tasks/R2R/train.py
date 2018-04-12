@@ -6,6 +6,7 @@ from torch import optim
 import torch.nn.functional as F
 
 import os
+import os.path
 import time
 import numpy as np
 import pandas as pd
@@ -13,16 +14,15 @@ from collections import defaultdict
 import argparse
 
 import utils
-from utils import read_vocab,write_vocab,build_vocab,Tokenizer,vocab_padding_idx,timeSince, try_cuda
+from utils import read_vocab,write_vocab,build_vocab,Tokenizer,vocab_pad_idx,timeSince, try_cuda
 from env import R2RBatch, ImageFeatures
 import model
 from model import EncoderLSTM, AttnDecoderLSTM
 from follower import Seq2SeqAgent
 import eval
 
+from vocab import TRAINVAL_VOCAB, TRAIN_VOCAB
 
-TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
-TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
 RESULT_DIR = 'tasks/R2R/results/'
 SNAPSHOT_DIR = 'tasks/R2R/snapshots/'
 PLOT_DIR = 'tasks/R2R/plots/'
@@ -54,21 +54,21 @@ def eval_model(agent, results_path, use_dropout, feedback, allow_cheat=False):
     agent.results_path = results_path
     agent.test(use_dropout=use_dropout, feedback=feedback, allow_cheat=allow_cheat)
 
-def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_envs=None):
+def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
     ''' Train on training set, validating on both seen and unseen. '''
 
     if val_envs is None:
         val_envs = {}
 
-    agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
     print('Training with %s feedback' % feedback_method)
-    encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate, weight_decay=weight_decay) 
+    encoder_optimizer = optim.Adam(agent.encoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    decoder_optimizer = optim.Adam(agent.decoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     data_log = defaultdict(list)
     start = time.time()
    
     for idx in range(0, n_iters, log_every):
+        agent.env = train_env
 
         interval = min(log_every,n_iters-idx)
         iter = idx + interval
@@ -97,17 +97,15 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_e
             agent.write_results()
             score_summary, _ = evaluator.score_file(agent.results_path)
 
-            # TODO: testing code, remove
-            score_summary_direct, _ = evaluator.score_results(agent.results)
-            assert score_summary == score_summary_direct
+            # # TODO: testing code, remove
+            # score_summary_direct, _ = evaluator.score_results(agent.results)
+            # assert score_summary == score_summary_direct
 
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
             for metric,val in score_summary.items():
                 data_log['%s %s' % (env_name,metric)].append(val)
                 if metric in ['success_rate']:
                     loss_str += ', %s: %.3f' % (metric, val)
-
-        agent.env = train_env
 
         print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
                                              iter, float(iter)/n_iters*100, loss_str)))
@@ -118,9 +116,9 @@ def train(args, train_env, encoder, decoder, n_iters, log_every=log_every, val_e
         df.to_csv(df_path)
         
         split_string = "-".join(train_env.splits)
-        enc_path = '%s%s_%s_enc_iter_%d' % (SNAPSHOT_DIR, get_model_prefix(args), split_string, iter)
-        dec_path = '%s%s_%s_dec_iter_%d' % (SNAPSHOT_DIR, get_model_prefix(args), split_string, iter)
-        agent.save(enc_path, dec_path)
+
+        path = os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
+        agent.save(path)
 
 
 def setup():
@@ -151,7 +149,7 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
-    encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, vocab_padding_idx,
+    encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, vocab_pad_idx,
                                    dropout_ratio, bidirectional=bidirectional))
     decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
                                        action_embedding_size, hidden_size, dropout_ratio,
@@ -161,19 +159,29 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
                 for split in test_splits}
     return train_env, test_envs, encoder, decoder
 
+def train_setup(args):
+    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['val_seen', 'val_unseen'])
+    agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
+    return agent, train_env, val_envs
+
+def test_setup(args):
+    train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
+    agent = Seq2SeqAgent(None, "", encoder, decoder, max_episode_len)
+    return agent, train_env, test_envs
+
 def train_val(args):
     ''' Train on the training set, and validate on seen and unseen splits. '''
-    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['val_seen', 'val_unseen'])
-    train(args, train_env, encoder, decoder, n_iters, val_envs=val_envs)
+    agent, train_env, val_envs = train_setup(args)
+    train(args, train_env, agent, n_iters, val_envs=val_envs)
 
 def test_submission(args):
     ''' Train on combined training and validation sets, and generate test submission. '''
-    train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
+    agent, train_env, test_envs = test_setup(args)
+    train(args, train_env, agent, n_iters)
+
     test_env = test_envs['test']
+    agent.env = test_env
 
-    train(args, train_env, encoder, decoder, n_iters)
-
-    agent = Seq2SeqAgent(test_env, "", encoder, decoder, max_episode_len)
     agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
     agent.test(use_dropout=False, feedback='argmax')
     agent.write_results()
