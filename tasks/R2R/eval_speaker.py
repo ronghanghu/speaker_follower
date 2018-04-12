@@ -30,40 +30,54 @@ class SpeakerEvaluation(object):
         # results should be a dictionary mapping instr_ids to dictionaries, with each dictionary containing (at least) a 'words' field
         instr_ids = set(self.instr_ids)
 
-        model_scores = []
-
-        all_refs = []
-        all_hyps = []
-
         instr_count = 0
-        skip_count = 0
-        skipped_refs = set()
+
+        results_by_base_id = {}
+
         for instr_id, result in results.items():
             if instr_id in instr_ids:
                 instr_count += 1
                 instr_ids.remove(instr_id)
-                if 'score' in result:
-                    model_scores.append(result['score'])
 
-                gt = self.gt[int(instr_id.split('_')[0])]
-                tokenized_refs = [Tokenizer.split_sentence(ref) for ref in gt['instructions']]
-                if len(tokenized_refs) != 3:
-                    skip_count += 1
-                    skipped_refs.add(instr_id)
-                    continue
-                tokenized_hyp = result['words']
-                all_refs.append(tokenized_refs)
-                all_hyps.append(tokenized_hyp)
-                if verbose and instr_count % 100 == 0:
-                    for i, ref in enumerate(tokenized_refs):
-                        print("ref {}:\t{}".format(i, ' '.join(ref)))
-                    print("pred  :\t{}".format(' '.join(tokenized_hyp)))
-                    print()
+                base_id = int(instr_id.split('_')[0])
+
+                if base_id in results_by_base_id:
+                    assert results_by_base_id[base_id]['words'] == result['words']
+                else:
+                    results_by_base_id[base_id] = result
 
         assert len(instr_ids) == 0, 'Missing %d of %d instruction ids from %s' \
                                     % (len(instr_ids), len(self.instr_ids), ",".join(self.splits))
+
+        all_refs = []
+        all_hyps = []
+
+        model_scores = []
+
+        skip_count = 0
+        skipped_refs = set()
+        for base_id, result in sorted(results_by_base_id.items()):
+            gt = self.gt[base_id]
+            tokenized_refs = [Tokenizer.split_sentence(ref) for ref in gt['instructions']]
+            if len(tokenized_refs) != 3:
+                skip_count += 1
+                skipped_refs.add(base_id)
+                continue
+            tokenized_hyp = result['words']
+            all_refs.append(tokenized_refs)
+            all_hyps.append(tokenized_hyp)
+
+            if 'score' in result:
+                model_scores.append(result['score'])
+
+            if verbose and instr_count % 100 == 0:
+                for i, ref in enumerate(tokenized_refs):
+                    print("ref {}:\t{}".format(i, ' '.join(ref)))
+                print("pred  :\t{}".format(' '.join(tokenized_hyp)))
+                print()
+
         if skip_count != 0:
-            print("skipped {} instructions without 3 refs: {}".format(skip_count, ' '.join(skipped_refs)))
+            print("skipped {} instructions without 3 refs: {}".format(skip_count, ' '.join(str(i) for i in skipped_refs)))
 
         model_score = np.mean(model_scores)
         bleu, unpenalized_bleu = multi_bleu(all_refs, all_hyps)

@@ -501,7 +501,7 @@ class Seq2SeqAgent(BaseAgent):
             self.encoder.eval()
             self.decoder.eval()
         self.set_beam_size(beam_size)
-        super(Seq2SeqAgent, self).test()
+        return super(Seq2SeqAgent, self).test()
 
     def train(self, encoder_optimizer, decoder_optimizer, n_iters, feedback='teacher'):
         ''' Train for a given number of iterations '''

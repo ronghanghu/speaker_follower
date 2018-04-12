@@ -70,8 +70,6 @@ def run_rational_follower(env, evaluator, follower, speaker, beam_size):
         accuracies_by_weight[speaker_weight] = score_summary
     return accuracies_by_weight
 
-
-
 def validate_entry_point(args):
     follower, follower_train_env, follower_val_envs = train.train_setup(args)
     follower.load(args.follower_prefix)
