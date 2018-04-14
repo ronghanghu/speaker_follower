@@ -210,7 +210,7 @@ def make_arg_parser():
     parser.add_argument("--mean_pooled_image_feature_store", default="img_features/ResNet-152-imagenet.tsv")
     parser.add_argument("--convolutional_image_feature_store", default="img_features/imagenet_convolutional")
 
-    parser.add_argument("--feedback_method", choices=["sample", "teacher"], default="teacher")
+    parser.add_argument("--feedback_method", choices=["sample", "teacher"], default="sample")
 
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     return parser
