@@ -4,18 +4,21 @@ import train
 import train_speaker
 from follower import Seq2SeqAgent
 import pprint
+import json
+import MatterSim
+import env
 
 import numpy as np
 
-from collections import namedtuple
+from collections import namedtuple, Counter
 
 #FollowerCandidate = namedtuple("FollowerCandidate", "instr_id, observations, actions, instr_encoding, follower_score, speaker_score")
 
-def run_rational_follower(env, evaluator, follower, speaker, beam_size):
-    follower.env = env
-    env.reset_epoch()
+def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None):
+    follower.env = envir
+    envir.reset_epoch()
 
-    follower.feedback = 'argmax'
+    feedback_method = 'argmax'
     follower.encoder.eval()
     follower.decoder.eval()
 
@@ -28,7 +31,20 @@ def run_rational_follower(env, evaluator, follower, speaker, beam_size):
 
     looped = False
     while True:
-        beam_candidates = follower.beam_search(beam_size)
+        if include_gold:
+            follower.feedback = 'teacher'
+            gold_candidates = follower._rollout_with_loss()
+        else:
+            gold_candidates = []
+
+        follower.feedback = feedback_method
+        beam_candidates = follower.beam_search(beam_size, load_next_minibatch=not include_gold)
+
+        if include_gold:
+            assert len(gold_candidates) == len(beam_candidates)
+            for i, bc in enumerate(beam_candidates):
+                assert gold_candidates[i]['instr_id'] == bc[0]['instr_id']
+                bc.insert(0, gold_candidates[i])
 
         cand_obs = []
         cand_actions = []
@@ -57,18 +73,51 @@ def run_rational_follower(env, evaluator, follower, speaker, beam_size):
         if looped:
             break
 
+    follower_scores = [cand['follower_score']
+                       for lst in candidate_lists_by_instr_id.values()
+                       for cand in lst]
+    speaker_scores = [cand['speaker_score']
+                       for lst in candidate_lists_by_instr_id.values()
+                       for cand in lst]
+
+    speaker_std = np.std(speaker_scores)
+    follower_std = np.std(follower_scores)
+
     accuracies_by_weight = {}
+    index_counts_by_weight = {}
+
 
     for speaker_weight in np.arange(0, 20 + 1) / 20.0:
-        results = {
-            instr_id: max(candidates, key=lambda cand: cand['speaker_score'] * speaker_weight + cand['follower_score'] * (1 - speaker_weight))
-            for instr_id, candidates in candidate_lists_by_instr_id.items()
-        }
+        results = {}
+        index_count = Counter()
+
+        speaker_scaled_weight = speaker_weight / speaker_std
+        follower_scaled_weight = (1 - speaker_weight) / follower_std
+
+        for instr_id, candidates in candidate_lists_by_instr_id.items():
+            best_ix, best_cand = max(enumerate(candidates), key=lambda tp: tp[1]['speaker_score'] * speaker_scaled_weight + tp[1]['follower_score'] * follower_scaled_weight)
+            results[instr_id] = best_cand
+            index_count[best_ix] += 1
 
         score_summary, _ = evaluator.score_results(results)
 
         accuracies_by_weight[speaker_weight] = score_summary
-    return accuracies_by_weight
+        index_counts_by_weight[speaker_weight] = index_count
+
+    if output_file:
+        with open(output_file, 'w') as f:
+            for candidate_list in candidate_lists_by_instr_id.values():
+                for i, candidate in enumerate(candidate_list):
+                    del candidate['observations']
+                    candidate['actions'] = ' '.join(env.FOLLOWER_MODEL_ACTIONS[ac] for ac in candidate['actions'])
+                    candidate['instruction'] = envir.tokenizer.decode_sentence(candidate['instr_encoding'], break_on_eos=False, join=True)
+                    del candidate['instr_encoding']
+                    del candidate['trajectory']
+                    candidate['rank'] = i
+                    candidate['gold'] = (include_gold and i == 0)
+            json.dump(candidate_lists_by_instr_id, f, sort_keys=True, indent=4, separators=(',', ':'))
+
+    return accuracies_by_weight, index_counts_by_weight
 
 def validate_entry_point(args):
     follower, follower_train_env, follower_val_envs = train.train_setup(args)
@@ -77,8 +126,13 @@ def validate_entry_point(args):
     speaker, speaker_train_env, speaker_val_envs = train_speaker.train_setup(args)
 
     for env_name, (env, evaluator) in follower_val_envs.items():
-        accuracies_by_weight = run_rational_follower(env, evaluator, follower, speaker, args.beam_size)
+        if args.output_file:
+            output_file = "{}_{}.json".format(args.output_file, env_name)
+        else:
+            output_file = None
+        accuracies_by_weight, index_counts_by_weight = run_rational_follower(env, evaluator, follower, speaker, args.beam_size, include_gold=args.include_gold, output_file=output_file)
         pprint.pprint(accuracies_by_weight)
+        pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
         print("max success_rate with weight: {}".format(weight))
         for metric,val in score_summary.items():
@@ -89,6 +143,8 @@ def make_arg_parser():
     parser.add_argument("follower_prefix")
     parser.add_argument("speaker_prefix")
     parser.add_argument("--beam_size", type=int, default=10)
+    parser.add_argument("--include_gold", action='store_true')
+    parser.add_argument("--output_file")
     return parser
 
 if __name__ == "__main__":

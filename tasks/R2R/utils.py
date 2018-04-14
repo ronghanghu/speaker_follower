@@ -53,7 +53,8 @@ def load_nav_graphs(scans):
 def load_datasets(splits):
     data = []
     for split in splits:
-        assert split in ['train', 'train_subset', 'val_seen', 'val_unseen', 'test']
+        assert split in ['train', 'train_subset', 'val_seen', 'val_unseen', 'test',
+                         'sub_train', 'sub_val_seen', 'sub_val_unseen', 'sub_train_subset']
         with open('tasks/R2R/data/R2R_%s.json' % split) as f:
             data += json.load(f)
     return data

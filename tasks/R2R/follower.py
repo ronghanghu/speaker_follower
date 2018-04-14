@@ -57,8 +57,14 @@ class BaseAgent(object):
         self.losses = [] # For learning agents
 
     def write_results(self):
+        results = {}
+        for key, item in self.results.items():
+            results[key] = {
+                'instr_id': item['instr_id'],
+                'trajectory': item['trajectory'],
+            }
         with open(self.results_path, 'w') as f:
-            json.dump(self.results, f)
+            json.dump(results, f)
 
     def rollout(self):
         ''' Return a list of dicts containing instr_id:'xx', path:[(viewpointId, heading_rad, elevation_rad)]  '''
@@ -224,7 +230,6 @@ class Seq2SeqAgent(BaseAgent):
             a[i] = index
         return try_cuda(Variable(a, requires_grad=False))
 
-
     def _proc_batch(self, obs, beamed=False):
         encoded_instructions = [ob['instr_encoding'] for ob in (flatten(obs) if beamed else obs)]
         return batch_instructions_from_encoded(encoded_instructions)
@@ -250,7 +255,9 @@ class Seq2SeqAgent(BaseAgent):
         traj = [{
             'instr_id': ob['instr_id'],
             'trajectory': [path_element_from_observation(ob)],
-            'actions': []
+            'actions': [],
+            'observations': [ob],
+            'instr_encoding': ob['instr_encoding']
         } for ob in obs]
 
         # Forward through encoder, giving initial hidden state and memory cell for decoder
@@ -259,7 +266,7 @@ class Seq2SeqAgent(BaseAgent):
 
         # Initial action
         a_t = try_cuda(Variable(torch.ones(batch_size).long() * self.model_actions.index('<start>'),
-                    requires_grad=False))
+                                requires_grad=False))
         ended = np.array([False] * batch_size) # Indices match permuation of the model, not env
 
         # Do a sequence rollout and calculate the loss
@@ -310,6 +317,7 @@ class Seq2SeqAgent(BaseAgent):
                     traj[i]['trajectory'].append(path_element_from_observation(ob))
                     traj[i]['score'] = sequence_scores[i]
                     traj[i]['actions'].append(a_t.data[i])
+                    traj[i]['observations'].append(ob)
 
             # Update ended list
             for i in range(batch_size):

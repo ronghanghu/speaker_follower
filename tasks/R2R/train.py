@@ -21,7 +21,7 @@ from model import EncoderLSTM, AttnDecoderLSTM
 from follower import Seq2SeqAgent
 import eval
 
-from vocab import TRAINVAL_VOCAB, TRAIN_VOCAB
+from vocab import SUBTRAIN_VOCAB, TRAINVAL_VOCAB, TRAIN_VOCAB
 
 RESULT_DIR = 'tasks/R2R/results/'
 SNAPSHOT_DIR = 'tasks/R2R/snapshots/'
@@ -37,16 +37,18 @@ action_embedding_size = 32
 hidden_size = 512
 bidirectional = False
 dropout_ratio = 0.5
-feedback_method = 'sample' # teacher or sample
+n_iters = 20000
+#feedback_method = 'sample' # teacher or sample
 learning_rate = 0.0001
 weight_decay = 0.0005
-n_iters = 5000 if feedback_method == 'teacher' else 20000
 FEATURE_SIZE = 2048
 log_every=100
 #log_every=20
 
 def get_model_prefix(args):
-    model_prefix = 'seq2seq_%s_imagenet' % (feedback_method)
+    model_prefix = 'follower_%s_imagenet' % (args.feedback_method)
+    if args.use_train_subset:
+        model_prefix = 'trainsub_' + model_prefix
     model_prefix = model_prefix + "_" + args.image_feature_type
     return model_prefix
 
@@ -60,7 +62,7 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
     if val_envs is None:
         val_envs = {}
 
-    print('Training with %s feedback' % feedback_method)
+    print('Training with %s feedback' % args.feedback_method)
     encoder_optimizer = optim.Adam(agent.encoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
     decoder_optimizer = optim.Adam(agent.decoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
@@ -75,7 +77,7 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
         data_log['iteration'].append(iter)
 
         # Train for log_every interval
-        agent.train(encoder_optimizer, decoder_optimizer, interval, feedback=feedback_method)
+        agent.train(encoder_optimizer, decoder_optimizer, interval, feedback=args.feedback_method)
         train_losses = np.array(agent.losses)
         assert len(train_losses) == interval
         train_loss_avg = np.average(train_losses)
@@ -86,7 +88,7 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
         for env_name, (env, evaluator) in val_envs.items():
             agent.env = env
             # Get validation loss under the same conditions as training
-            agent.test(use_dropout=True, feedback=feedback_method, allow_cheat=True)
+            agent.test(use_dropout=True, feedback=args.feedback_method, allow_cheat=True)
             val_losses = np.array(agent.losses)
             val_loss_avg = np.average(val_losses)
             data_log['%s loss' % env_name].append(val_loss_avg)
@@ -125,6 +127,8 @@ def setup():
     torch.manual_seed(1)
     torch.cuda.manual_seed(1)
     # Check for vocabs
+    if not os.path.exists(SUBTRAIN_VOCAB):
+        write_vocab(build_vocab(splits=['sub_train']), SUBTRAIN_VOCAB)
     if not os.path.exists(TRAIN_VOCAB):
         write_vocab(build_vocab(splits=['train']), TRAIN_VOCAB)
     if not os.path.exists(TRAINVAL_VOCAB):
@@ -160,7 +164,17 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     return train_env, test_envs, encoder, decoder
 
 def train_setup(args):
-    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['val_seen', 'val_unseen'])
+    train_splits = ['train']
+    val_splits = ['train_subset', 'val_seen', 'val_unseen']
+
+    vocab = TRAIN_VOCAB
+
+    if args.use_train_subset:
+        train_splits = ['sub_' + split for split in train_splits]
+        val_splits = ['sub_' + split for split in val_splits]
+        vocab = SUBTRAIN_VOCAB
+
+    train_env, val_envs, encoder, decoder = make_env_and_models(args, vocab, train_splits, val_splits)
     agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
     return agent, train_env, val_envs
 
@@ -195,6 +209,10 @@ def make_arg_parser():
 
     parser.add_argument("--mean_pooled_image_feature_store", default="img_features/ResNet-152-imagenet.tsv")
     parser.add_argument("--convolutional_image_feature_store", default="img_features/imagenet_convolutional")
+
+    parser.add_argument("--feedback_method", choices=["sample", "teacher"], default="teacher")
+
+    parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     return parser
 
 if __name__ == "__main__":

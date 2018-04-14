@@ -21,7 +21,7 @@ from model import SpeakerEncoderLSTM, SpeakerDecoderLSTM
 from speaker import Seq2SeqSpeaker
 import eval_speaker
 
-from vocab import TRAIN_VOCAB, TRAINVAL_VOCAB
+from vocab import SUBTRAIN_VOCAB, TRAIN_VOCAB, TRAINVAL_VOCAB
 
 RESULT_DIR = 'tasks/R2R/speaker/results/'
 SNAPSHOT_DIR = 'tasks/R2R/speaker/snapshots/'
@@ -48,6 +48,8 @@ log_every=100
 
 def get_model_prefix(args):
     model_prefix = 'speaker_%s_imagenet' % (feedback_method)
+    if args.use_train_subset:
+        model_prefix = 'trainsub_' + model_prefix
     model_prefix = model_prefix + "_" + args.image_feature_type
     return model_prefix
 
@@ -146,7 +148,16 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     return train_env, test_envs, encoder, decoder
 
 def train_setup(args):
-    train_env, val_envs, encoder, decoder = make_env_and_models(args, TRAIN_VOCAB, ['train'], ['train_subset', 'val_seen', 'val_unseen'])
+    train_splits = ['train']
+    val_splits = ['train_subset', 'val_seen', 'val_unseen']
+    vocab = TRAIN_VOCAB
+
+    if args.use_train_subset:
+        train_splits = ['sub_' + split for split in train_splits]
+        val_splits = ['sub_' + split for split in val_splits]
+        vocab = SUBTRAIN_VOCAB
+
+    train_env, val_envs, encoder, decoder = make_env_and_models(args, vocab, train_splits, val_splits)
     agent = Seq2SeqSpeaker(train_env, "", encoder, decoder, MAX_INSTRUCTION_LENGTH)
     return agent, train_env, val_envs
 
@@ -180,6 +191,8 @@ def make_arg_parser():
 
     parser.add_argument("--mean_pooled_image_feature_store", default="img_features/ResNet-152-imagenet.tsv")
     parser.add_argument("--convolutional_image_feature_store", default="img_features/imagenet_convolutional")
+
+    parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     return parser
 
 if __name__ == "__main__":

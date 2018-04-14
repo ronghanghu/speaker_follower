@@ -138,11 +138,7 @@ class Seq2SeqSpeaker(object):
             log_probs = F.log_softmax(logit, dim=1)
             word_scores = -F.nll_loss(log_probs, w_t, ignore_index=vocab_pad_idx, reduce=False)
             sequence_scores += word_scores.data
-
-            if feedback == 'teacher':
-                loss -= torch.mean(word_scores)
-            else:
-                loss += F.nll_loss(log_probs, target, ignore_index=vocab_pad_idx, reduce=True, size_average=True)
+            loss += F.nll_loss(log_probs, target, ignore_index=vocab_pad_idx, reduce=True, size_average=True)
 
             for perm_index, src_index in enumerate(perm_indices):
                 word_idx = w_t[perm_index].data[0]

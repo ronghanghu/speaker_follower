@@ -34,17 +34,29 @@ class SpeakerEvaluation(object):
 
         results_by_base_id = {}
 
+        mismatches = []
+
         for instr_id, result in results.items():
             if instr_id in instr_ids:
-                instr_count += 1
                 instr_ids.remove(instr_id)
 
                 base_id = int(instr_id.split('_')[0])
 
                 if base_id in results_by_base_id:
-                    assert results_by_base_id[base_id]['words'] == result['words']
+                    old_predicted = results_by_base_id[base_id]['words']
+                    new_predicted = result['words']
+                    if old_predicted != new_predicted:
+                        mismatches.append((old_predicted, new_predicted))
                 else:
                     results_by_base_id[base_id] = result
+
+        if mismatches:
+            print("mismatching outputs for sentences:")
+            for old_pred,new_pred in mismatches:
+                print(old_pred)
+                print(new_pred)
+                print()
+
 
         assert len(instr_ids) == 0, 'Missing %d of %d instruction ids from %s' \
                                     % (len(instr_ids), len(self.instr_ids), ",".join(self.splits))
@@ -57,6 +69,7 @@ class SpeakerEvaluation(object):
         skip_count = 0
         skipped_refs = set()
         for base_id, result in sorted(results_by_base_id.items()):
+            instr_count += 1
             gt = self.gt[base_id]
             tokenized_refs = [Tokenizer.split_sentence(ref) for ref in gt['instructions']]
             if len(tokenized_refs) != 3:
