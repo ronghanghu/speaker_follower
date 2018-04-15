@@ -35,7 +35,6 @@ max_episode_len = 20
 word_embedding_size = 256
 action_embedding_size = 32
 hidden_size = 512
-bidirectional = False
 dropout_ratio = 0.5
 n_iters = 20000
 #feedback_method = 'sample' # teacher or sample
@@ -49,6 +48,8 @@ def get_model_prefix(args):
     model_prefix = 'follower_%s_imagenet' % (args.feedback_method)
     if args.use_train_subset:
         model_prefix = 'trainsub_' + model_prefix
+    if args.bidirectional:
+        model_prefix = model_prefix + "_bidirectional"
     model_prefix = model_prefix + "_" + args.image_feature_type
     return model_prefix
 
@@ -68,7 +69,7 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
 
     data_log = defaultdict(list)
     start = time.time()
-   
+
     for idx in range(0, n_iters, log_every):
         agent.env = train_env
 
@@ -116,7 +117,7 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
         df.set_index('iteration')
         df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args))
         df.to_csv(df_path)
-        
+
         split_string = "-".join(train_env.splits)
 
         path = os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
@@ -152,9 +153,9 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
     train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
-    enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
+    enc_hidden_size = hidden_size//2 if args.bidirectional else hidden_size
     encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, vocab_pad_idx,
-                                   dropout_ratio, bidirectional=bidirectional))
+                                   dropout_ratio, bidirectional=args.bidirectional))
     decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
                                        action_embedding_size, hidden_size, dropout_ratio,
                                        ablate_image_features=image_features.image_feature_type == "none",
@@ -211,6 +212,7 @@ def make_arg_parser():
     parser.add_argument("--convolutional_image_feature_store", default="img_features/imagenet_convolutional")
 
     parser.add_argument("--feedback_method", choices=["sample", "teacher"], default="sample")
+    parser.add_argument("--bidirectional", action='store_true')
 
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     return parser
