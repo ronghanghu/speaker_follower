@@ -115,7 +115,7 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
                     del candidate['trajectory']
                     candidate['rank'] = i
                     candidate['gold'] = (include_gold and i == 0)
-            json.dump(candidate_lists_by_instr_id, f, sort_keys=True, indent=4, separators=(',', ':'))
+            utils.pretty_json_dump(candidate_lists_by_instr_id, f)
 
     return accuracies_by_weight, index_counts_by_weight
 
@@ -124,6 +124,7 @@ def validate_entry_point(args):
     follower.load(args.follower_prefix)
 
     speaker, speaker_train_env, speaker_val_envs = train_speaker.train_setup(args)
+    speaker.load(args.speaker_prefix)
 
     for env_name, (env, evaluator) in follower_val_envs.items():
         if args.output_file:

@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from utils import vocab_pad_idx, vocab_bos_idx, vocab_eos_idx, flatten, try_cuda
 
-from env import IGNORE_ACTION_INDEX, index_action_tuple
+from env import IGNORE_ACTION_INDEX, index_action_tuple, FOLLOWER_MODEL_ACTIONS
 
 from follower import batch_instructions_from_encoded
 
@@ -92,8 +92,8 @@ class Seq2SeqSpeaker(object):
     def _rollout_with_instructions_obs_and_actions(self, path_obs, path_actions, encoded_instructions, feedback):
         assert len(path_obs) == len(path_actions)
         assert len(path_obs) == len(encoded_instructions)
-
         start_obs, batched_image_features, batched_actions, path_mask, path_lengths, encoded_instructions, perm_indices = self._batch_observations_and_actions(path_obs, path_actions, encoded_instructions)
+
         instr_seq, instr_seq_mask, instr_seq_lengths = batch_instructions_from_encoded(encoded_instructions)
 
         batch_size = len(start_obs)
@@ -110,8 +110,12 @@ class Seq2SeqSpeaker(object):
             outputs[src_index] = {
                 'instr_id': start_obs[perm_index]['instr_id'],
                 'word_indices': [],
+                #'actions': ' '.join(FOLLOWER_MODEL_ACTIONS[ac] for ac in path_actions[src_index]),
             }
         assert all(outputs)
+
+        # for i in range(batch_size):
+        #     assert outputs[i]['instr_id'] != '1008_0', "found example at index {}".format(i)
 
         # Do a sequence rollout and calculate the loss
         loss = 0

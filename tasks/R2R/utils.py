@@ -181,6 +181,9 @@ def try_cuda(pytorch_obj):
     else:
         return pytorch_obj
 
+def pretty_json_dump(obj, fp):
+    json.dump(obj, fp, sort_keys=True, indent=4, separators=(',', ':'))
+
 def run(arg_parser, entry_function):
     arg_parser.add_argument("--pdb", action='store_true')
     arg_parser.add_argument("--ipdb", action='store_true')
