@@ -13,8 +13,9 @@ import networkx as nx
 import functools
 import os.path
 import time
+import paths
 
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 
 from utils import load_datasets, load_nav_graphs, structured_map, vocab_pad_idx
 
@@ -92,66 +93,84 @@ def index_action_tuple(action_tuple):
     else:
         return FOLLOWER_MODEL_ACTIONS.index('<end>')
 
-
 class ImageFeatures(object):
-    num_views = 36
-    mean_pooled_dim = 2048
-    def __init__(self, image_feature_type, mean_pooled_feature_store, convolutional_feature_store):
+    NUM_VIEWS = 36
+    MEAN_POOLED_DIM = 2048
+
+    def __init__(self, image_feature_type, image_feature_datasets):
         self.image_feature_type = image_feature_type
-        if image_feature_type == 'random':
-            features_by_scan_id = {}
-            features_by_view_id = {}
-            def get_feats(id, lookup):
-                if id in lookup:
-                    return lookup[id]
-                else:
-                    rand = np.random.RandomState(hash(id) % 2**32)
-                    feats = np.maximum(0.0, 0.5 * rand.randn(self.num_views, self.mean_pooled_dim // 2) + 0.3)
-                    lookup[id] = feats
-                return lookup[id]
-        self.convolutional_feature_store = convolutional_feature_store
-        if image_feature_type == 'mean_pooled' or image_feature_type == 'random':
-            assert mean_pooled_feature_store is not None
-            print('Loading image features from %s' % mean_pooled_feature_store)
+        image_feature_datasets = sorted(image_feature_datasets)
+        self.image_feature_datasets = image_feature_datasets
+
+        self.convolutional_feature_stores = [paths.convolutional_feature_store_paths[dataset]
+                                             for dataset in image_feature_datasets]
+        self.mean_pooled_feature_stores = [paths.mean_pooled_feature_store_paths[dataset]
+                                           for dataset in image_feature_datasets]
+        if image_feature_type == 'mean_pooled':
+            self.feature_dim = ImageFeatures.MEAN_POOLED_DIM * len(image_feature_datasets)
+            print('Loading image features from %s' % ', '.join(self.mean_pooled_feature_stores))
             tsv_fieldnames = ['scanId', 'viewpointId', 'image_w','image_h', 'vfov', 'features']
-            self.features = {}
-            with open(mean_pooled_feature_store, "rt") as tsv_in_file:
-                reader = csv.DictReader(tsv_in_file, delimiter='\t', fieldnames = tsv_fieldnames)
-                for item in reader:
-                    self.image_h = int(item['image_h'])
-                    self.image_w = int(item['image_w'])
-                    self.vfov = int(item['vfov'])
-                    long_id = self._make_id(item['scanId'], item['viewpointId'])
-                    if image_feature_type == 'random':
-                        scan_feats = get_feats(item['scanId'], features_by_scan_id)
-                        view_feats = get_feats(item['viewpointId'], features_by_view_id)
-                        features = np.concatenate((scan_feats, view_feats), axis=1)
-                    else:
-                        features = np.frombuffer(base64.decodebytes(bytearray(item['features'], 'utf-8')), dtype=np.float32).reshape((36, 2048))
-                    self.features[long_id] = features
+            self.features = defaultdict(list)
+            for mpfs in self.mean_pooled_feature_stores:
+                with open(mpfs, "rt") as tsv_in_file:
+                    reader = csv.DictReader(tsv_in_file, delimiter='\t', fieldnames = tsv_fieldnames)
+                    for item in reader:
+                        self.image_h = int(item['image_h'])
+                        self.image_w = int(item['image_w'])
+                        self.vfov = int(item['vfov'])
+                        long_id = self._make_id(item['scanId'], item['viewpointId'])
+                        features = np.frombuffer(base64.decodebytes(bytearray(item['features'], 'utf-8')), dtype=np.float32).reshape((ImageFeatures.NUM_VIEWS, ImageFeatures.MEAN_POOLED_DIM))
+                        self.features[long_id].append(features)
+            assert all(len(feats) == len(self.mean_pooled_feature_stores) for feats in self.features.values())
+            self.features = {
+                long_id: np.concatenate(feats, axis=1)
+                for long_id, feats in self.features.items()
+            }
         else:
             print('Image features not provided')
-            self.features = np.zeros(self.mean_pooled_dim, dtype=np.float32)
+            self.feature_dim = ImageFeatures.MEAN_POOLED_DIM
+            self.features = np.zeros(self.feature_dim, dtype=np.float32)
             self.image_w = 640
             self.image_h = 480
             self.vfov = 60
 
     @staticmethod
     def from_args(args):
-        return ImageFeatures(args.image_feature_type, args.mean_pooled_image_feature_store, args.convolutional_image_feature_store)
+        return ImageFeatures(args.image_feature_type, args.image_feature_datasets)
+
+    @staticmethod
+    def add_args(argument_parser):
+        argument_parser.add_argument("--image_feature_type", choices=["mean_pooled", "none", "attention"], default="mean_pooled")
+        argument_parser.add_argument("--image_attention_type", choices=["feedforward", "multiplicative"], default="feedforward")
+        argument_parser.add_argument("--image_attention_size", type=int)
+        argument_parser.add_argument("--image_feature_datasets", nargs="+", default=["imagenet"], help="{imagenet,places365}")
+
+    @staticmethod
+    def get_name(args):
+        if args.image_feature_type == "none":
+            return args.image_feature_type
+        name = '+'.join(sorted(args.image_feature_datasets))
+        if args.image_feature_type == "attention":
+            name = name + "_attention"
+        return name
 
     def _make_id(self, scanId, viewpointId):
         return scanId + '_' + viewpointId
 
         #@functools.lru_cache(maxsize=3000)
     def _get_convolutional_features(self, scanId, viewpointId, viewIndex):
-        path = os.path.join(self.convolutional_feature_store, scanId, "%s.npy" % viewpointId)
-        mmapped = np.load(path, mmap_mode='r')
-        return mmapped[viewIndex,:,:,:]
+        feats = []
+        for cfs in self.convolutional_feature_stores:
+            path = os.path.join(cfs, scanId, "%s.npy" % viewpointId)
+            mmapped = np.load(path, mmap_mode='r')
+            feats.append(mmapped[viewIndex,:,:,:])
+        if len(feats) > 1:
+            return np.concatenate(feats, axis=1)
+        return feats[0]
 
     def get_features(self, state):
         long_id = self._make_id(state.scanId, state.location.viewpointId)
-        if self.image_feature_type == 'mean_pooled' or self.image_feature_type == 'random':
+        if self.image_feature_type == 'mean_pooled':
             return self.features[long_id][state.viewIndex,:]
         elif self.image_feature_type == 'attention':
             return self._get_convolutional_features(state.scanId, state.location.viewpointId, state.viewIndex)

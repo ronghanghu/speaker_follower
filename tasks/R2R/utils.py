@@ -41,7 +41,7 @@ def load_nav_graphs(scans):
                 if item['included']:
                     for j,conn in enumerate(item['unobstructed']):
                         if conn and data[j]['included']:
-                            positions[item['image_id']] = np.array([item['pose'][3], 
+                            positions[item['image_id']] = np.array([item['pose'][3],
                                     item['pose'][7], item['pose'][11]]);
                             assert data[j]['unobstructed'][i], 'Graph should be undirected'
                             G.add_edge(item['image_id'],data[j]['image_id'],weight=distance(item,data[j]))
@@ -63,7 +63,7 @@ def load_datasets(splits):
 class Tokenizer(object):
     ''' Class to tokenize and encode a sentence. '''
     SENTENCE_SPLIT_REGEX = re.compile(r'(\W+)') # Split on any non-alphanumeric character
-  
+
     def __init__(self, vocab=None, encoding_length=20):
         self.encoding_length = encoding_length
         self.vocab = vocab
@@ -176,7 +176,11 @@ def all_equal(lst):
 
 def try_cuda(pytorch_obj):
     import torch.cuda
-    if torch.cuda.is_available():
+    try:
+        disabled = torch.cuda.disabled
+    except:
+        disabled = False
+    if torch.cuda.is_available() and not disabled:
         return pytorch_obj.cuda()
     else:
         return pytorch_obj
@@ -187,8 +191,13 @@ def pretty_json_dump(obj, fp):
 def run(arg_parser, entry_function):
     arg_parser.add_argument("--pdb", action='store_true')
     arg_parser.add_argument("--ipdb", action='store_true')
+    arg_parser.add_argument("--no_cuda", action='store_true')
 
     args = arg_parser.parse_args()
+
+    import torch.cuda
+    # todo: yuck
+    torch.cuda.disabled = args.no_cuda
 
     def log(out_file):
         subprocess.call("git rev-parse HEAD", shell=True, stdout=out_file)

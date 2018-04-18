@@ -45,7 +45,8 @@ log_every=100
 #log_every=20
 
 def get_model_prefix(args):
-    model_prefix = 'follower_%s_imagenet' % (args.feedback_method)
+    image_feature_name = ImageFeatures.get_name(args)
+    model_prefix = 'follower_{}_{}'.format(args.feedback_method, image_feature_name)
     if args.use_train_subset:
         model_prefix = 'trainsub_' + model_prefix
     if args.bidirectional:
@@ -136,14 +137,14 @@ def setup():
         write_vocab(build_vocab(splits=['train','val_seen','val_unseen']), TRAINVAL_VOCAB)
 
 
-def make_image_attention_layer(args):
+def make_image_attention_layer(args, image_features):
     if args.image_feature_type != 'attention':
         return None
     image_attention_size = args.image_attention_size or hidden_size
     if args.image_attention_type == 'feedforward':
-        return model.FeedforwardImageAttention(FEATURE_SIZE, hidden_size, image_attention_size)
+        return model.FeedforwardImageAttention(image_features.feature_dim, hidden_size, image_attention_size)
     elif args.image_attention_type == 'multiplicative':
-        return model.MultiplicativeImageAttention(FEATURE_SIZE, hidden_size, image_attention_size)
+        return model.MultiplicativeImageAttention(image_features.feature_dim, hidden_size, image_attention_size)
 
 
 def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
@@ -158,8 +159,9 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
                                    dropout_ratio, bidirectional=args.bidirectional))
     decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
                                        action_embedding_size, hidden_size, dropout_ratio,
+                                       feature_size=image_features.feature_dim,
                                        ablate_image_features=image_features.image_feature_type == "none",
-                                       image_attention_layer=make_image_attention_layer(args)))
+                                       image_attention_layer=make_image_attention_layer(args, image_features)))
     test_envs = {split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
                 for split in test_splits}
     return train_env, test_envs, encoder, decoder
@@ -204,13 +206,7 @@ def test_submission(args):
 
 def make_arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image_feature_type", choices=["mean_pooled", "none", "random", "attention"], default="mean_pooled")
-    parser.add_argument("--image_attention_type", choices=["feedforward", "multiplicative"], default="feedforward")
-    parser.add_argument("--image_attention_size", type=int)
-
-    parser.add_argument("--mean_pooled_image_feature_store", default="img_features/ResNet-152-imagenet.tsv")
-    parser.add_argument("--convolutional_image_feature_store", default="img_features/imagenet_convolutional")
-
+    ImageFeatures.add_args(parser)
     parser.add_argument("--feedback_method", choices=["sample", "teacher"], default="sample")
     parser.add_argument("--bidirectional", action='store_true')
 

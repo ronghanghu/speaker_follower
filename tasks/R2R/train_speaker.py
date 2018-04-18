@@ -42,12 +42,12 @@ learning_rate = 0.0001
 weight_decay = 0.0005
 #n_iters = 5000 if feedback_method == 'teacher' else 20000
 n_iters = 20000
-FEATURE_SIZE = 2048
 log_every=100
 #log_every=20
 
 def get_model_prefix(args):
-    model_prefix = 'speaker_%s_imagenet' % (feedback_method)
+    image_feature_name = ImageFeatures.get_name(args)
+    model_prefix = 'speaker_{}_{}'.format(feedback_method, image_feature_name)
     if args.use_train_subset:
         model_prefix = 'trainsub_' + model_prefix
     model_prefix = model_prefix + "_" + args.image_feature_type
@@ -137,7 +137,7 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
-    encoder = try_cuda(SpeakerEncoderLSTM(len(FOLLOWER_ENV_ACTIONS), action_embedding_size, FEATURE_SIZE,
+    encoder = try_cuda(SpeakerEncoderLSTM(len(FOLLOWER_ENV_ACTIONS), action_embedding_size, image_features.feature_dim,
                                           enc_hidden_size, IGNORE_ACTION_INDEX, dropout_ratio, bidirectional=bidirectional))
     decoder = try_cuda(SpeakerDecoderLSTM(len(vocab), word_embedding_size, hidden_size, dropout_ratio))
 
@@ -185,12 +185,7 @@ def test_submission(args):
 
 def make_arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image_feature_type", choices=["mean_pooled", "none", "random", "attention"], default="mean_pooled")
-    parser.add_argument("--image_attention_type", choices=["feedforward", "multiplicative"], default="feedforward")
-    parser.add_argument("--image_attention_size", type=int)
-
-    parser.add_argument("--mean_pooled_image_feature_store", default="img_features/ResNet-152-imagenet.tsv")
-    parser.add_argument("--convolutional_image_feature_store", default="img_features/imagenet_convolutional")
+    ImageFeatures.add_args(parser)
 
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     return parser
