@@ -107,8 +107,9 @@ class Tokenizer(object):
                 break
             else:
                 sentence.append(self.vocab[ix])
+        sentence = sentence[::-1]
         if join:
-            return " ".join(sentence[::-1])
+            return " ".join(sentence)
         return sentence
 
 
