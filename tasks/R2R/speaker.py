@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
+import torch.distributions as D
 
 from utils import vocab_pad_idx, vocab_bos_idx, vocab_eos_idx, flatten, try_cuda
 
@@ -135,7 +136,9 @@ class Seq2SeqSpeaker(object):
                 w_t = w_t.detach()
             elif feedback == 'sample':
                 probs = F.softmax(logit)    # sampling an action from model
-                w_t = probs.multinomial(1).detach().squeeze(-1)
+                m = D.Categorical(probs)
+                w_t = m.sample()
+                #w_t = probs.multinomial(1).detach().squeeze(-1)
             else:
                 sys.exit('Invalid feedback option')
 

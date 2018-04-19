@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
+import torch.distributions as D
 
 from utils import vocab_pad_idx, flatten, structured_map, try_cuda
 
@@ -278,8 +279,10 @@ class Seq2SeqAgent(BaseAgent):
             f_t = self._feature_variable(obs) # Image features from obs
             h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t, c_t, ctx, seq_mask)
             # Mask outputs where agent can't move forward
+            blocked_indices = []
             for i,ob in enumerate(obs):
                 if len(ob['navigableLocations']) <= 1:
+                    blocked_indices.append(i)
                     logit[i, self.model_actions.index('forward')] = -float('inf')
 
             # Supervised training
@@ -293,8 +296,16 @@ class Seq2SeqAgent(BaseAgent):
                 _,a_t = logit.max(1)        # student forcing - argmax
                 a_t = a_t.detach()
             elif self.feedback == 'sample':
-                probs = F.softmax(logit)    # sampling an action from model
-                a_t = probs.multinomial(1).detach().squeeze(-1)
+                probs = F.softmax(logit, dim=1)    # sampling an action from model
+                m = D.Categorical(probs)
+                sampled_blocked = True
+                while sampled_blocked:
+                    a_t = m.sample()            # sampling an action from model
+                    if blocked_indices:
+                        sampled_blocked = any(a_t.data[blocked_indices] == self.model_actions.index('forward'))
+                    else:
+                        sampled_blocked = False
+                #a_t = probs.multinomial(1).detach().squeeze(-1)
             else:
                 sys.exit('Invalid feedback option')
 
