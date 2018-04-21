@@ -30,19 +30,19 @@ PLOT_DIR = 'tasks/R2R/plots/'
 # TODO: how much is this truncating instructions?
 MAX_INPUT_LENGTH = 80
 
-batch_size = 100
+BATCH_SIZE = 100
 max_episode_len = 20
 word_embedding_size = 256
 action_embedding_size = 32
 hidden_size = 512
 dropout_ratio = 0.5
-n_iters = 20000
 #feedback_method = 'sample' # teacher or sample
 learning_rate = 0.0001
 weight_decay = 0.0005
 FEATURE_SIZE = 2048
 log_every=100
 #log_every=20
+save_every=1000
 
 def get_model_prefix(args):
     image_feature_name = ImageFeatures.get_name(args)
@@ -58,7 +58,7 @@ def eval_model(agent, results_path, use_dropout, feedback, allow_cheat=False):
     agent.results_path = results_path
     agent.test(use_dropout=use_dropout, feedback=feedback, allow_cheat=allow_cheat)
 
-def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
+def train(args, train_env, agent, log_every=log_every, val_envs=None):
     ''' Train on training set, validating on both seen and unseen. '''
 
     if val_envs is None:
@@ -71,10 +71,16 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
     data_log = defaultdict(list)
     start = time.time()
 
-    for idx in range(0, n_iters, log_every):
+    split_string = "-".join(train_env.splits)
+    def make_path(iter):
+        return os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
+
+    best_metrics = {}
+    last_model_saved = {}
+    for idx in range(0, args.n_iters, log_every):
         agent.env = train_env
 
-        interval = min(log_every,n_iters-idx)
+        interval = min(log_every,args.n_iters-idx)
         iter = idx + interval
         data_log['iteration'].append(iter)
 
@@ -86,6 +92,7 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
         data_log['train loss'].append(train_loss_avg)
         loss_str = 'train loss: %.4f' % train_loss_avg
 
+        save_log = []
         # Run validation
         for env_name, (env, evaluator) in val_envs.items():
             agent.env = env
@@ -111,19 +118,29 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
                 if metric in ['success_rate']:
                     loss_str += ', %s: %.3f' % (metric, val)
 
-        print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
-                                             iter, float(iter)/n_iters*100, loss_str)))
+                    key = (env_name, metric)
+                    if key not in best_metrics or best_metrics[key] < val:
+                        best_metrics[key] = val
+                        model_path = make_path(iter) + "_%s-%s=%.3f" % (env_name, metric, val)
+                        save_log.append("new best, saved model to %s" % model_path)
+                        agent.save(model_path)
+                        if key in last_model_saved:
+                            for old_model_path in agent._encoder_and_decoder_paths(last_model_saved[key]):
+                                os.remove(old_model_path)
+                        last_model_saved[key] = model_path
+
+        print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/args.n_iters),
+                                             iter, float(iter)/args.n_iters*100, loss_str)))
+        for s in save_log:
+            print(s)
+
+        if save_every and iter % save_every == 0:
+            agent.save(make_path(iter))
 
         df = pd.DataFrame(data_log)
         df.set_index('iteration')
         df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args))
         df.to_csv(df_path)
-
-        split_string = "-".join(train_env.splits)
-
-        path = os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
-        agent.save(path)
-
 
 def setup():
     torch.manual_seed(1)
@@ -147,7 +164,7 @@ def make_image_attention_layer(args, image_features):
         return model.MultiplicativeImageAttention(image_features.feature_dim, hidden_size, image_attention_size)
 
 
-def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
+def make_env_and_models(args, train_vocab_path, train_splits, test_splits, batch_size=BATCH_SIZE):
     setup()
     image_features = ImageFeatures.from_args(args)
     vocab = read_vocab(train_vocab_path)
@@ -166,7 +183,7 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
                 for split in test_splits}
     return train_env, test_envs, encoder, decoder
 
-def train_setup(args):
+def train_setup(args, batch_size=BATCH_SIZE):
     train_splits = ['train']
     val_splits = ['train_subset', 'val_seen', 'val_unseen']
 
@@ -177,11 +194,11 @@ def train_setup(args):
         val_splits = ['sub_' + split for split in val_splits]
         vocab = SUBTRAIN_VOCAB
 
-    train_env, val_envs, encoder, decoder = make_env_and_models(args, vocab, train_splits, val_splits)
+    train_env, val_envs, encoder, decoder = make_env_and_models(args, vocab, train_splits, val_splits, batch_size=batch_size)
     agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
     return agent, train_env, val_envs
 
-def test_setup(args):
+def test_setup(args, batch_size=BATCH_SIZE):
     train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
     agent = Seq2SeqAgent(None, "", encoder, decoder, max_episode_len)
     return agent, train_env, test_envs
@@ -189,17 +206,17 @@ def test_setup(args):
 def train_val(args):
     ''' Train on the training set, and validate on seen and unseen splits. '''
     agent, train_env, val_envs = train_setup(args)
-    train(args, train_env, agent, n_iters, val_envs=val_envs)
+    train(args, train_env, agent, val_envs=val_envs)
 
 def test_submission(args):
     ''' Train on combined training and validation sets, and generate test submission. '''
     agent, train_env, test_envs = test_setup(args)
-    train(args, train_env, agent, n_iters)
+    train(args, train_env, agent)
 
     test_env = test_envs['test']
     agent.env = test_env
 
-    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
+    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', args.n_iters)
     agent.test(use_dropout=False, feedback='argmax')
     agent.write_results()
 
@@ -207,8 +224,9 @@ def test_submission(args):
 def make_arg_parser():
     parser = argparse.ArgumentParser()
     ImageFeatures.add_args(parser)
-    parser.add_argument("--feedback_method", choices=["sample", "teacher"], default="sample")
+    parser.add_argument("--feedback_method", choices=["sample", "teacher", "teacher+sample"], default="sample")
     parser.add_argument("--bidirectional", action='store_true')
+    parser.add_argument("--n_iters", type=int, default=20000)
 
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     return parser

@@ -14,7 +14,7 @@ from collections import namedtuple, Counter
 
 #FollowerCandidate = namedtuple("FollowerCandidate", "instr_id, observations, actions, instr_encoding, follower_score, speaker_score")
 
-def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None):
+def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None, compute_oracle=False):
     follower.env = envir
     envir.reset_epoch()
 
@@ -63,6 +63,8 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
                 assert candidate['instr_id'] == speaker_scored_candidate['instr_id']
                 candidate['follower_score'] = candidate['score']
                 candidate['speaker_score'] = speaker_scored_candidate['score']
+                if compute_oracle:
+                    candidate['eval_result'] = evaluator._score_item(candidate['instr_id'], candidate['trajectory'])._asdict()
             start_index += len(instance_candidates)
             assert utils.all_equal([i['instr_id'] for i in instance_candidates])
             instr_id = instance_candidates[0]['instr_id']
@@ -104,12 +106,29 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
         accuracies_by_weight[speaker_weight] = score_summary
         index_counts_by_weight[speaker_weight] = index_count
 
+    if compute_oracle:
+        oracle_results = {}
+        oracle_index_count = Counter()
+        for instr_id, candidates in candidate_lists_by_instr_id.items():
+            best_ix, best_cand = min(enumerate(candidates), key=lambda tp: tp[1]['eval_result']['nav_error'])
+            # if include_gold and not best_cand['eval_result']['success']:
+            #     print("--compute_oracle and --include_gold but not success!")
+            #     print(best_cand)
+            oracle_results[instr_id] = best_cand
+            oracle_index_count[best_ix] += 1
+
+        oracle_score_summary, _ = evaluator.score_results(oracle_results)
+        print("oracle results:")
+        pprint.pprint(oracle_score_summary)
+        pprint.pprint(sorted(oracle_index_count.items()))
+
     if output_file:
         with open(output_file, 'w') as f:
             for candidate_list in candidate_lists_by_instr_id.values():
                 for i, candidate in enumerate(candidate_list):
                     del candidate['observations']
-                    candidate['actions'] = ' '.join(env.FOLLOWER_MODEL_ACTIONS[ac] for ac in candidate['actions'])
+                    candidate['actions'] = [env.FOLLOWER_MODEL_ACTIONS[ac] for ac in candidate['actions']]
+                    candidate['scored_actions'] = list(zip(candidate['actions'], candidate['scores']))
                     candidate['instruction'] = envir.tokenizer.decode_sentence(candidate['instr_encoding'], break_on_eos=False, join=True)
                     del candidate['instr_encoding']
                     del candidate['trajectory']
@@ -120,18 +139,21 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
     return accuracies_by_weight, index_counts_by_weight
 
 def validate_entry_point(args):
-    follower, follower_train_env, follower_val_envs = train.train_setup(args)
-    follower.load(args.follower_prefix)
+    follower, follower_train_env, follower_val_envs = train.train_setup(args, args.batch_size)
+    load_args = {}
+    if args.no_cuda:
+        load_args['map_location'] = 'cpu'
+    follower.load(args.follower_prefix, **load_args)
 
     speaker, speaker_train_env, speaker_val_envs = train_speaker.train_setup(args)
-    speaker.load(args.speaker_prefix)
+    speaker.load(args.speaker_prefix, **load_args)
 
     for env_name, (env, evaluator) in follower_val_envs.items():
         if args.output_file:
             output_file = "{}_{}.json".format(args.output_file, env_name)
         else:
             output_file = None
-        accuracies_by_weight, index_counts_by_weight = run_rational_follower(env, evaluator, follower, speaker, args.beam_size, include_gold=args.include_gold, output_file=output_file)
+        accuracies_by_weight, index_counts_by_weight = run_rational_follower(env, evaluator, follower, speaker, args.beam_size, include_gold=args.include_gold, output_file=output_file, compute_oracle=args.compute_oracle)
         pprint.pprint(accuracies_by_weight)
         pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
@@ -144,8 +166,10 @@ def make_arg_parser():
     parser.add_argument("follower_prefix")
     parser.add_argument("speaker_prefix")
     parser.add_argument("--beam_size", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=30)
     parser.add_argument("--include_gold", action='store_true')
     parser.add_argument("--output_file")
+    parser.add_argument("--compute_oracle", action='store_true')
     return parser
 
 if __name__ == "__main__":

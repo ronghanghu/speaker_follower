@@ -222,4 +222,3 @@ def run(arg_parser, entry_function):
         pdb.runcall(entry_function, args)
     else:
         entry_function(args)
-

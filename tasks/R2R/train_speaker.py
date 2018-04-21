@@ -44,6 +44,7 @@ weight_decay = 0.0005
 n_iters = 20000
 log_every=100
 #log_every=20
+save_every=1000
 
 def get_model_prefix(args):
     image_feature_name = ImageFeatures.get_name(args)
@@ -57,7 +58,7 @@ def eval_model(agent, results_path, use_dropout, feedback, allow_cheat=False):
     agent.results_path = results_path
     agent.test(use_dropout=use_dropout, feedback=feedback, allow_cheat=allow_cheat)
 
-def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
+def train(args, train_env, agent, log_every=log_every, val_envs=None):
     ''' Train on training set, validating on both seen and unseen. '''
 
     if val_envs is None:
@@ -70,10 +71,17 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
     data_log = defaultdict(list)
     start = time.time()
 
-    for idx in range(0, n_iters, log_every):
+    split_string = "-".join(train_env.splits)
+
+    def make_path(iter):
+        return os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
+
+    best_metrics = {}
+    last_model_saved = {}
+    for idx in range(0, args.n_iters, log_every):
         agent.env = train_env
 
-        interval = min(log_every,n_iters-idx)
+        interval = min(log_every,args.n_iters-idx)
         iter = idx + interval
         data_log['iteration'].append(iter)
 
@@ -85,6 +93,7 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
         data_log['train loss'].append(train_loss_avg)
         loss_str = 'train loss: %.4f' % train_loss_avg
 
+        save_log = []
         # Run validation
         for env_name, (env, evaluator) in val_envs.items():
             agent.env = env
@@ -105,20 +114,32 @@ def train(args, train_env, agent, n_iters, log_every=log_every, val_envs=None):
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
             for metric,val in score_summary.items():
                 data_log['%s %s' % (env_name,metric)].append(val)
-                if metric in ['bleu', 'unpenalized_bleu']:
+                if metric in ['bleu']:
                     loss_str += ', %s: %.3f' % (metric, val)
 
-        print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
-                                             iter, float(iter)/n_iters*100, loss_str)))
+                    key = (env_name, metric)
+                    if key not in best_metrics or best_metrics[key] < val:
+                        best_metrics[key] = val
+                        model_path = make_path(iter) + "_%s-%s=%.3f" % (env_name, metric, val)
+                        save_log.append("new best, saved model to %s" % model_path)
+                        agent.save(model_path)
+                        if key in last_model_saved:
+                            for old_model_path in agent._encoder_and_decoder_paths(last_model_saved[key]):
+                                os.remove(old_model_path)
+                        last_model_saved[key] = model_path
+
+        print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/args.n_iters),
+                                             iter, float(iter)/args.n_iters*100, loss_str)))
+        for s in save_log:
+            print(s)
+
+        if save_every and iter % save_every == 0:
+            agent.save(make_path(iter))
 
         df = pd.DataFrame(data_log)
         df.set_index('iteration')
         df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args))
         df.to_csv(df_path)
-        
-        split_string = "-".join(train_env.splits)
-        path = os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
-        agent.save(path)
 
 def setup():
     torch.manual_seed(1)
@@ -169,12 +190,12 @@ def test_setup(args):
 def train_val(args):
     ''' Train on the training set, and validate on seen and unseen splits. '''
     agent, train_env, val_envs = train_setup(args)
-    train(args, train_env, agent, n_iters, val_envs=val_envs)
+    train(args, train_env, agent, val_envs=val_envs)
 
 def test_submission(args):
     ''' Train on combined training and validation sets, and generate test submission. '''
     agent, train_env, test_envs = test_setup(args)
-    train(args, train_env, agent, n_iters)
+    train(args, train_env, agent)
 
     test_env = test_envs['test']
     agent.env = test_env
@@ -188,6 +209,7 @@ def make_arg_parser():
     ImageFeatures.add_args(parser)
 
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
+    parser.add_argument("--n_iters", type=int, default=20000)
     return parser
 
 if __name__ == "__main__":
