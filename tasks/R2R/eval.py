@@ -14,6 +14,11 @@ from follower import BaseAgent
 
 import train
 
+from collections import namedtuple
+
+EvalResult = namedtuple("EvalResult", "nav_error, oracle_error, trajectory_steps, trajectory_length, success, oracle_success")
+
+
 class Evaluation(object):
     ''' Results submission format:  [{'instr_id': string, 'trajectory':[(viewpoint_id, heading_rads, elevation_rads),] } ] '''
 
@@ -53,16 +58,23 @@ class Evaluation(object):
         goal = gt['path'][-1]
         final_position = path[-1][0]
         nearest_position = self._get_nearest(gt['scan'], goal, path)
-        self.scores['nav_errors'].append(self.distances[gt['scan']][final_position][goal])
-        self.scores['oracle_errors'].append(self.distances[gt['scan']][nearest_position][goal])
-        self.scores['trajectory_steps'].append(len(path)-1)
-        distance = 0 # Work out the length of the path in meters
+        nav_error = self.distances[gt['scan']][final_position][goal]
+        oracle_error = self.distances[gt['scan']][nearest_position][goal]
+        trajectory_steps = len(path)-1
+        trajectory_length = 0 # Work out the length of the path in meters
         prev = path[0]
         for curr in path[1:]:
-            distance += self.distances[gt['scan']][prev[0]][curr[0]]
+            trajectory_length += self.distances[gt['scan']][prev[0]][curr[0]]
             prev = curr
-        self.scores['trajectory_lengths'].append(distance)
 
+        success = nav_error < self.error_margin
+        # check for type errors
+        assert success == True or success == False
+        # check for type errors
+        oracle_success = oracle_error < self.error_margin
+        assert oracle_success == True or oracle_success == False
+        return EvalResult(nav_error=nav_error, oracle_error=oracle_error, trajectory_steps=trajectory_steps,
+                          trajectory_length=trajectory_length, success=success, oracle_success=oracle_success)
 
     def score_results(self, results):
         # results should be a dictionary mapping instr_ids to dictionaries, with each dictionary containing (at least) a 'trajectory' field
@@ -75,7 +87,14 @@ class Evaluation(object):
             if instr_id in instr_ids:
                 instr_count += 1
                 instr_ids.remove(instr_id)
-                self._score_item(instr_id, result['trajectory'])
+                eval_result = self._score_item(instr_id, result['trajectory'])
+
+                self.scores['nav_errors'].append(eval_result.nav_error)
+                self.scores['oracle_errors'].append(eval_result.oracle_error)
+                self.scores['trajectory_steps'].append(eval_result.trajectory_steps)
+                self.scores['trajectory_lengths'].append(eval_result.trajectory_length)
+                self.scores['success'].append(eval_result.success)
+                self.scores['oracle_success'].append(eval_result.oracle_success)
                 if 'score' in result:
                     model_scores.append(result['score'])
 
@@ -87,23 +106,26 @@ class Evaluation(object):
             'nav_error': np.average(self.scores['nav_errors']),
             'oracle_error': np.average(self.scores['oracle_errors']),
             'steps': np.average(self.scores['trajectory_steps']),
-            'lengths': np.average(self.scores['trajectory_lengths'])
+            'lengths': np.average(self.scores['trajectory_lengths']),
+            'success_rate': float(sum(self.scores['success']) / len(self.scores['success'])),
+            'oracle_rate': float(sum(self.scores['oracle_success']) / len(self.scores['oracle_success'])),
         }
         if len(model_scores) > 0:
             assert len(model_scores) == instr_count
             score_summary['model_score'] = np.average(model_scores)
 
         num_successes = len([i for i in self.scores['nav_errors'] if i < self.error_margin])
-        score_summary['success_rate'] = float(num_successes)/float(len(self.scores['nav_errors']))
+        #score_summary['success_rate'] = float(num_successes)/float(len(self.scores['nav_errors']))
+        assert float(num_successes) / float(len(self.scores['nav_errors'])) == score_summary['success_rate']
         oracle_successes = len([i for i in self.scores['oracle_errors'] if i < self.error_margin])
-        score_summary['oracle_rate'] = float(oracle_successes)/float(len(self.scores['oracle_errors']))
+        assert float(oracle_successes) / float(len(self.scores['oracle_errors'])) == score_summary['oracle_rate']
+        #score_summary['oracle_rate'] = float(oracle_successes)/float(len(self.scores['oracle_errors']))
         return score_summary, self.scores
 
     def score_file(self, output_file):
         ''' Evaluate each agent trajectory based on how close it got to the goal location '''
         with open(output_file) as f:
             return self.score_results(json.load(f))
-
 
 def eval_simple_agents(args):
     ''' Run simple baselines on each split. '''

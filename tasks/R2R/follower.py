@@ -23,12 +23,18 @@ def backchain_inference_states(last_inference_state):
     observations = []
     actions = []
     inf_state = last_inference_state
+    scores = []
+    last_score = None
     while inf_state is not None:
         states.append(inf_state.world_state)
         observations.append(inf_state.observation)
         actions.append(inf_state.last_action)
+        if last_score is not None:
+            scores.append(last_score - inf_state.score)
+        last_score = inf_state.score
         inf_state = inf_state.prev_inference_state
-    return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:] # exclude start action
+    scores.append(last_score)
+    return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:], list(reversed(scores))[1:] # exclude start action
 
 def batch_instructions_from_encoded(encoded_instructions):
     # encoded_instructions: list of padded lists of token indices (must all be the same length, and padded with vocab_pad_idx at the end
@@ -244,101 +250,108 @@ class Seq2SeqAgent(BaseAgent):
             return [beam[0] for beam in beams]
 
     def _rollout_with_loss(self):
-        world_states = self.env.reset(sort=True)
-        obs = self.env.observe(world_states)
-        obs = np.array(obs)
-        batch_size = len(obs)
+        initial_world_states = self.env.reset(sort=True)
+        initial_obs = self.env.observe(initial_world_states)
+        initial_obs = np.array(initial_obs)
+        batch_size = len(initial_obs)
 
         # get mask and lengths
-        seq, seq_mask, seq_lengths = self._proc_batch(obs)
-
-        # Record starting point
-        traj = [{
-            'instr_id': ob['instr_id'],
-            'trajectory': [path_element_from_observation(ob)],
-            'actions': [],
-            'observations': [ob],
-            'instr_encoding': ob['instr_encoding']
-        } for ob in obs]
+        seq, seq_mask, seq_lengths = self._proc_batch(initial_obs)
 
         # Forward through encoder, giving initial hidden state and memory cell for decoder
         # TODO consider not feeding this into the decoder, and just using attention
-        ctx,h_t,c_t = self.encoder(seq, seq_lengths)
 
-        # Initial action
-        a_t = try_cuda(Variable(torch.ones(batch_size).long() * self.model_actions.index('<start>'),
-                                requires_grad=False))
-        ended = np.array([False] * batch_size) # Indices match permuation of the model, not env
-
-        # Do a sequence rollout and calculate the loss
         self.loss = 0
-        env_action = [None] * batch_size
-        sequence_scores = try_cuda(torch.zeros(batch_size))
-        for t in range(self.episode_len):
 
-            f_t = self._feature_variable(obs) # Image features from obs
-            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t, c_t, ctx, seq_mask)
-            # Mask outputs where agent can't move forward
-            blocked_indices = []
-            for i,ob in enumerate(obs):
-                if len(ob['navigableLocations']) <= 1:
-                    blocked_indices.append(i)
-                    logit[i, self.model_actions.index('forward')] = -float('inf')
+        for feedback in self.feedback.split("+"):
+            ctx,h_t,c_t = self.encoder(seq, seq_lengths)
+            # Record starting point
+            traj = [{
+                'instr_id': ob['instr_id'],
+                'trajectory': [path_element_from_observation(ob)],
+                'actions': [],
+                'scores': [],
+                'observations': [ob],
+                'instr_encoding': ob['instr_encoding']
+            } for ob in initial_obs]
 
-            # Supervised training
-            target = self._teacher_action(obs, ended)
-            self.loss += self.criterion(logit, target)
+            obs = initial_obs
+            world_states = initial_world_states
 
-            # Determine next model inputs
-            if self.feedback == 'teacher':
-                a_t = target                # teacher forcing
-            elif self.feedback == 'argmax':
-                _,a_t = logit.max(1)        # student forcing - argmax
-                a_t = a_t.detach()
-            elif self.feedback == 'sample':
-                probs = F.softmax(logit, dim=1)    # sampling an action from model
-                m = D.Categorical(probs)
-                sampled_blocked = True
-                while sampled_blocked:
-                    a_t = m.sample()            # sampling an action from model
-                    if blocked_indices:
-                        sampled_blocked = any(a_t.data[blocked_indices] == self.model_actions.index('forward'))
-                    else:
-                        sampled_blocked = False
-                #a_t = probs.multinomial(1).detach().squeeze(-1)
-            else:
-                sys.exit('Invalid feedback option')
+            # Initial action
+            a_t = try_cuda(Variable(torch.ones(batch_size).long() * self.model_actions.index('<start>'),
+                                    requires_grad=False))
+            ended = np.array([False] * batch_size) # Indices match permuation of the model, not env
 
-            action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
-            sequence_scores += action_scores
+            # Do a sequence rollout and calculate the loss
+            env_action = [None] * batch_size
+            sequence_scores = try_cuda(torch.zeros(batch_size))
+            for t in range(self.episode_len):
 
-            # dfried: I changed this so that the ended list is updated afterward; this causes <end> to be added as the last action, along with its score, and the final world state will be duplicated (to more closely match beam search)
-            # Make environment action
-            for i in range(batch_size):
-                action_idx = a_t[i].data[0]
-                env_action[i] = self.env_actions[action_idx]
+                f_t = self._feature_variable(obs) # Image features from obs
+                h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t, c_t, ctx, seq_mask)
+                # Mask outputs where agent can't move forward
+                blocked_indices = []
+                for i,ob in enumerate(obs):
+                    if len(ob['navigableLocations']) <= 1:
+                        blocked_indices.append(i)
+                        logit[i, self.model_actions.index('forward')] = -float('inf')
 
-            world_states = self.env.step(world_states, env_action)
-            obs = self.env.observe(world_states)
-            # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
+                # Supervised training
+                target = self._teacher_action(obs, ended)
+                self.loss += self.criterion(logit, target)
 
-            # Save trajectory output
-            for i,ob in enumerate(obs):
-                if not ended[i]:
-                    traj[i]['trajectory'].append(path_element_from_observation(ob))
-                    traj[i]['score'] = sequence_scores[i]
-                    traj[i]['actions'].append(a_t.data[i])
-                    traj[i]['observations'].append(ob)
+                # Determine next model inputs
+                if feedback == 'teacher':
+                    a_t = target                # teacher forcing
+                elif feedback == 'argmax':
+                    _,a_t = logit.max(1)        # student forcing - argmax
+                    a_t = a_t.detach()
+                elif feedback == 'sample':
+                    probs = F.softmax(logit, dim=1)    # sampling an action from model
+                    m = D.Categorical(probs)
+                    sampled_blocked = True
+                    while sampled_blocked:
+                        a_t = m.sample()            # sampling an action from model
+                        if blocked_indices:
+                            sampled_blocked = any(a_t.data[blocked_indices] == self.model_actions.index('forward'))
+                        else:
+                            sampled_blocked = False
+                    #a_t = probs.multinomial(1).detach().squeeze(-1)
+                else:
+                    sys.exit('Invalid feedback option')
 
-            # Update ended list
-            for i in range(batch_size):
-                action_idx = a_t[i].data[0]
-                if action_idx == self.model_actions.index('<end>'):
-                    ended[i] = True
+                action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
+                sequence_scores += action_scores
 
-            # Early exit if all ended
-            if ended.all():
-                break
+                # dfried: I changed this so that the ended list is updated afterward; this causes <end> to be added as the last action, along with its score, and the final world state will be duplicated (to more closely match beam search)
+                # Make environment action
+                for i in range(batch_size):
+                    action_idx = a_t[i].data[0]
+                    env_action[i] = self.env_actions[action_idx]
+
+                world_states = self.env.step(world_states, env_action)
+                obs = self.env.observe(world_states)
+                # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
+
+                # Save trajectory output
+                for i,ob in enumerate(obs):
+                    if not ended[i]:
+                        traj[i]['trajectory'].append(path_element_from_observation(ob))
+                        traj[i]['score'] = sequence_scores[i]
+                        traj[i]['scores'].append(action_scores[i])
+                        traj[i]['actions'].append(a_t.data[i])
+                        traj[i]['observations'].append(ob)
+
+                # Update ended list
+                for i in range(batch_size):
+                    action_idx = a_t[i].data[0]
+                    if action_idx == self.model_actions.index('<end>'):
+                        ended[i] = True
+
+                # Early exit if all ended
+                if ended.all():
+                    break
 
         #self.losses.append(self.loss.data[0] / self.episode_len)
         # shouldn't divide by the episode length because of masking
@@ -486,7 +499,7 @@ class Seq2SeqAgent(BaseAgent):
             assert this_completed
             this_trajs = []
             for inf_state in sorted(this_completed, key=lambda t: t.score, reverse=True)[:beam_size]:
-                path_states, path_observations, path_actions = backchain_inference_states(inf_state)
+                path_states, path_observations, path_actions, path_scores = backchain_inference_states(inf_state)
                 # this will have messed-up headings for (at least some) starting locations because of
                 # discretization, so read from the observations instead
                 ## path = [(obs.viewpointId, state.heading, state.elevation)
@@ -499,6 +512,7 @@ class Seq2SeqAgent(BaseAgent):
                     'observations': path_observations,
                     'actions': path_actions,
                     'score': inf_state.score,
+                    'scores': path_scores,
                 })
             trajs.append(this_trajs)
         return trajs
@@ -524,7 +538,7 @@ class Seq2SeqAgent(BaseAgent):
 
     def train(self, encoder_optimizer, decoder_optimizer, n_iters, feedback='teacher'):
         ''' Train for a given number of iterations '''
-        assert feedback in self.feedback_options
+        assert all(f in self.feedback_options for f in feedback.split("+"))
         self.feedback = feedback
         self.encoder.train()
         self.decoder.train()
@@ -552,8 +566,8 @@ class Seq2SeqAgent(BaseAgent):
         torch.save(self.encoder.state_dict(), encoder_path)
         torch.save(self.decoder.state_dict(), decoder_path)
 
-    def load(self, path):
+    def load(self, path, **kwargs):
         ''' Loads parameters (but not training state) '''
         encoder_path, decoder_path = self._encoder_and_decoder_paths(path)
-        self.encoder.load_state_dict(torch.load(encoder_path))
-        self.decoder.load_state_dict(torch.load(decoder_path))
+        self.encoder.load_state_dict(torch.load(encoder_path, **kwargs))
+        self.decoder.load_state_dict(torch.load(decoder_path, **kwargs))
