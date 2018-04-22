@@ -397,6 +397,8 @@ class Seq2SeqAgent(BaseAgent):
                     a_t_list.append(inf_state.last_action)
 
             a_t = try_cuda(Variable(torch.LongTensor(a_t_list), requires_grad=False))
+            if len(a_t.shape) == 1:
+                a_t = a_t.unsqueeze(0)
             flat_obs = flatten(obs)
             f_t = self._feature_variable(flat_obs) # Image features from obs
 

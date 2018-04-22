@@ -180,7 +180,7 @@ class AttnDecoderLSTM(nn.Module):
         ctx_mask: batch x seq_len - indices to be masked
         '''
         action_embeds = self.embedding(action)   # (batch, 1, embedding_size)
-        action_embeds = action_embeds.squeeze()
+        action_embeds = action_embeds.squeeze(1)
         if self.ablate_image_features:
             feature = torch.zeros_like(feature)
         if self.image_attention_layer:
