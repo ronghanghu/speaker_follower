@@ -12,6 +12,7 @@ import numpy as np
 import networkx as nx
 import subprocess
 import itertools
+import base64
 
 
 # padding, unknown word, end of sentence
@@ -41,7 +42,7 @@ def load_nav_graphs(scans):
                 if item['included']:
                     for j,conn in enumerate(item['unobstructed']):
                         if conn and data[j]['included']:
-                            positions[item['image_id']] = np.array([item['pose'][3], 
+                            positions[item['image_id']] = np.array([item['pose'][3],
                                     item['pose'][7], item['pose'][11]]);
                             assert data[j]['unobstructed'][i], 'Graph should be undirected'
                             G.add_edge(item['image_id'],data[j]['image_id'],weight=distance(item,data[j]))
@@ -59,11 +60,18 @@ def load_datasets(splits):
             data += json.load(f)
     return data
 
+def decode_base64(string):
+    if sys.version_info[0] == 2:
+        return base64.decodestring(bytearray(string))
+    elif sys.version_info[0] == 3:
+        return base64.decodebytes(bytearray(string, 'utf-8'))
+    else:
+        raise ValueError("decode_base64 can't handle python version {}".format(sys.version_info[0]))
 
 class Tokenizer(object):
     ''' Class to tokenize and encode a sentence. '''
     SENTENCE_SPLIT_REGEX = re.compile(r'(\W+)') # Split on any non-alphanumeric character
-  
+
     def __init__(self, vocab=None, encoding_length=20):
         self.encoding_length = encoding_length
         self.vocab = vocab
@@ -157,8 +165,9 @@ def timeSince(since, percent):
     return '%s (- %s)' % (asMinutes(s), asMinutes(rs))
 
 
-def structured_map(function, *args, nested=False):
+def structured_map(function, *args, **kwargs):
     #assert all(len(a) == len(args[0]) for a in args[1:])
+    nested = kwargs.get('nested', False)
     acc = []
     for t in zip(*args):
         if nested:

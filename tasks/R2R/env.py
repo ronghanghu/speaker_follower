@@ -6,7 +6,6 @@ import MatterSim
 import csv
 import numpy as np
 import math
-import base64
 import json
 import random
 import networkx as nx
@@ -17,7 +16,7 @@ import paths
 
 from collections import namedtuple, defaultdict
 
-from utils import load_datasets, load_nav_graphs, structured_map, vocab_pad_idx
+from utils import load_datasets, load_nav_graphs, structured_map, vocab_pad_idx, decode_base64
 
 csv.field_size_limit(sys.maxsize)
 
@@ -119,7 +118,7 @@ class ImageFeatures(object):
                         self.image_w = int(item['image_w'])
                         self.vfov = int(item['vfov'])
                         long_id = self._make_id(item['scanId'], item['viewpointId'])
-                        features = np.frombuffer(base64.decodebytes(bytearray(item['features'], 'utf-8')), dtype=np.float32).reshape((ImageFeatures.NUM_VIEWS, ImageFeatures.MEAN_POOLED_DIM))
+                        features = np.frombuffer(decode_base64(item['features']), dtype=np.float32).reshape((ImageFeatures.NUM_VIEWS, ImageFeatures.MEAN_POOLED_DIM))
                         self.features[long_id].append(features)
             assert all(len(feats) == len(self.mean_pooled_feature_stores) for feats in self.features.values())
             self.features = {
@@ -179,7 +178,7 @@ class ImageFeatures(object):
             return self.features
 
 class EnvBatch():
-    ''' A simple wrapper for a batch of MatterSim environments, 
+    ''' A simple wrapper for a batch of MatterSim environments,
         using discretized viewpoints and pretrained features '''
 
     def __init__(self, image_features, batch_size, beam_size):
@@ -223,7 +222,7 @@ class EnvBatch():
         return structured_map(f, self.sims_view(beamed), world_states, nested=beamed)
 
     def makeActions(self, world_states, actions, beamed=False):
-        ''' Take an action using the full state dependent action interface (with batched input). 
+        ''' Take an action using the full state dependent action interface (with batched input).
             Every action element should be an (index, heading, elevation) tuple. '''
         def f(sim, world_state, action):
             index, heading, elevation = action
@@ -233,7 +232,7 @@ class EnvBatch():
         return structured_map(f, self.sims_view(beamed), world_states, actions, nested=beamed)
 
     def makeSimpleActions(self, simple_indices, beamed=False):
-        ''' Take an action using a simple interface: 0-forward, 1-turn left, 2-turn right, 3-look up, 4-look down. 
+        ''' Take an action using a simple interface: 0-forward, 1-turn left, 2-turn right, 3-look up, 4-look down.
             All viewpoint changes are 30 degrees. Forward, look up and look down may not succeed - check state.
             WARNING - Very likely this simple interface restricts some edges in the graph. Parts of the
             environment may not longer be navigable. '''
@@ -260,7 +259,7 @@ class R2RBatch():
         self.image_features = image_features
         self.data = []
         self.scans = []
-        for item in load_datasets(splits):  
+        for item in load_datasets(splits):
             # Split multiple instructions into separate entries
             for j,instr in enumerate(item['instructions']):
                 self.scans.append(item['scan'])
@@ -318,7 +317,7 @@ class R2RBatch():
         self.batch = batch
 
     def reset_epoch(self):
-        ''' Reset the data index to beginning of epoch. Primarily for testing. 
+        ''' Reset the data index to beginning of epoch. Primarily for testing.
             You must still call reset() for a new episode. '''
         self.ix = 0
 
@@ -334,12 +333,12 @@ class R2RBatch():
                 # Look directly at the viewpoint before moving
                 if loc.rel_heading > math.pi/6.0:
                       return (0, 1, 0) # Turn right
-                elif loc.rel_heading < -math.pi/6.0: 
+                elif loc.rel_heading < -math.pi/6.0:
                       return (0,-1, 0) # Turn left
                 elif loc.rel_elevation > math.pi/6.0 and state.viewIndex//12 < 2:
                       return (0, 0, 1) # Look up
                 elif loc.rel_elevation < -math.pi/6.0 and state.viewIndex//12 > 0:
-                      return (0, 0,-1) # Look down            
+                      return (0, 0,-1) # Look down
                 else:
                       return (i, 0, 0) # Move
         # Can't see it - first neutralize camera elevation
@@ -353,7 +352,7 @@ class R2RBatch():
         if target_heading < 0:
             target_heading += 2.0*math.pi
         if state.heading > target_heading and state.heading - target_heading < math.pi:
-            return (0,-1, 0) # Turn left  
+            return (0,-1, 0) # Turn left
         if target_heading > state.heading and target_heading - state.heading > math.pi:
             return (0,-1, 0) # Turn left
         return (0, 1, 0) # Turn right
