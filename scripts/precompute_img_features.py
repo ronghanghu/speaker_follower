@@ -42,6 +42,7 @@ MODEL = 'models/ResNet-152-model.caffemodel'  # You need to download this, see R
 
 mean_pooled_features = False
 convolutional_features = True
+split_conv_features = True
 OUTFILE = 'img_features/ResNet-152-imagenet.tsv'
 CONV_FEATURE_DIR = 'img_features/imagenet_convolutional'
 GRAPHS = 'connectivity/'
@@ -62,7 +63,7 @@ def load_viewpointids():
                 for item in data:
                     if item['included']:
                         viewpointIds.append((scan, item['image_id']))
-    print 'Loaded %d viewpoints' % len(viewpointIds)
+    print('Loaded %d viewpoints' % len(viewpointIds))
     return viewpointIds
 
 
@@ -165,13 +166,17 @@ def build_tsv():
                     'features': base64.b64encode(features)
                 })
             if convolutional_features:
-                np.save(os.path.join(CONV_FEATURE_DIR, scanId, "%s.npy" % viewpointId), conv_features)
+                if split_conv_features:
+                    for feat_index, split_feat in enumerate(conv_features):
+                        np.save(os.path.join(CONV_FEATURE_DIR, scanId, "%s_%d.npy" % (viewpointId, feat_index)), split_feat)
+                else:
+                    np.save(os.path.join(CONV_FEATURE_DIR, scanId, "%s.npy" % viewpointId), conv_features)
             count += 1
             t_net.toc()
             if count % 100 == 0:
-                print 'Processed %d / %d viewpoints, %.1fs avg render time, %.1fs avg net time, projected %.1f hours' %\
+                print('Processed %d / %d viewpoints, %.1fs avg render time, %.1fs avg net time, projected %.1f hours' %\
                   (count,len(viewpointIds), t_render.average_time, t_net.average_time,
-                  (t_render.average_time+t_net.average_time)*len(viewpointIds)/3600)
+                  (t_render.average_time+t_net.average_time)*len(viewpointIds)/3600))
 
 
 def read_tsv(infile):
@@ -193,5 +198,5 @@ if __name__ == "__main__":
 
     build_tsv()
     data = read_tsv(OUTFILE)
-    print 'Completed %d viewpoints' % len(data)
+    print('Completed %d viewpoints' % len(data))
 
