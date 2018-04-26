@@ -14,7 +14,7 @@ from collections import namedtuple, Counter
 
 #FollowerCandidate = namedtuple("FollowerCandidate", "instr_id, observations, actions, instr_encoding, follower_score, speaker_score")
 
-def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None, compute_oracle=False):
+def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None, compute_oracle=False, mask_undo=False):
     follower.env = envir
     envir.reset_epoch()
 
@@ -38,7 +38,7 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
             gold_candidates = []
 
         follower.feedback = feedback_method
-        beam_candidates = follower.beam_search(beam_size, load_next_minibatch=not include_gold)
+        beam_candidates = follower.beam_search(beam_size, load_next_minibatch=not include_gold, mask_undo=mask_undo)
 
         if include_gold:
             assert len(gold_candidates) == len(beam_candidates)
@@ -153,7 +153,7 @@ def validate_entry_point(args):
             output_file = "{}_{}.json".format(args.output_file, env_name)
         else:
             output_file = None
-        accuracies_by_weight, index_counts_by_weight = run_rational_follower(env, evaluator, follower, speaker, args.beam_size, include_gold=args.include_gold, output_file=output_file, compute_oracle=args.compute_oracle)
+        accuracies_by_weight, index_counts_by_weight = run_rational_follower(env, evaluator, follower, speaker, args.beam_size, include_gold=args.include_gold, output_file=output_file, compute_oracle=args.compute_oracle, mask_undo=args.mask_undo)
         pprint.pprint(accuracies_by_weight)
         pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
@@ -170,6 +170,7 @@ def make_arg_parser():
     parser.add_argument("--include_gold", action='store_true')
     parser.add_argument("--output_file")
     parser.add_argument("--compute_oracle", action='store_true')
+    parser.add_argument("--mask_undo", action='store_true')
     return parser
 
 if __name__ == "__main__":

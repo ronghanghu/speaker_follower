@@ -25,6 +25,9 @@ FOLLOWER_MODEL_ACTIONS = ['left', 'right', 'up', 'down', 'forward', '<end>', '<s
 END_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<end>")
 IGNORE_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<ignore>")
 
+LEFT_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("left")
+RIGHT_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("right")
+
 FOLLOWER_ENV_ACTIONS = [
     (0,-1, 0), # left
     (0, 1, 0), # right

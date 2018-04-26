@@ -95,7 +95,7 @@ class Seq2SeqSpeaker(object):
         assert len(path_obs) == len(encoded_instructions)
         start_obs, batched_image_features, batched_actions, path_mask, path_lengths, encoded_instructions, perm_indices = self._batch_observations_and_actions(path_obs, path_actions, encoded_instructions)
 
-        instr_seq, instr_seq_mask, instr_seq_lengths = batch_instructions_from_encoded(encoded_instructions)
+        instr_seq, _, _ = batch_instructions_from_encoded(encoded_instructions, self.instruction_len)
 
         batch_size = len(start_obs)
 

@@ -72,8 +72,7 @@ class Tokenizer(object):
     ''' Class to tokenize and encode a sentence. '''
     SENTENCE_SPLIT_REGEX = re.compile(r'(\W+)') # Split on any non-alphanumeric character
 
-    def __init__(self, vocab=None, encoding_length=20):
-        self.encoding_length = encoding_length
+    def __init__(self, vocab=None):
         self.vocab = vocab
         self.word_to_index = {}
         if vocab:
@@ -96,17 +95,18 @@ class Tokenizer(object):
         if len(self.word_to_index) == 0:
             sys.exit('Tokenizer has no vocab')
         encoding = []
-        for word in Tokenizer.split_sentence(sentence)[::-1]:
+        for word in Tokenizer.split_sentence(sentence):
             if word in self.word_to_index:
                 encoding.append(self.word_to_index[word])
             else:
                 encoding.append(vocab_unk_idx)
-        encoding.append(vocab_eos_idx)
-        utterance_length = len(encoding)
-        if utterance_length < self.encoding_length:
-            encoding += [vocab_pad_idx] * (self.encoding_length - len(encoding))
-        arr = np.array(encoding[:self.encoding_length])
-        return arr, min(self.encoding_length, utterance_length)
+        #encoding.append(vocab_eos_idx)
+        #utterance_length = len(encoding)
+        #if utterance_length < self.encoding_length:
+            #encoding += [vocab_pad_idx] * (self.encoding_length - len(encoding))
+        #encoding = encoding[:self.encoding_length] # leave room for unks
+        arr = np.array(encoding)
+        return arr, len(encoding)
 
     def decode_sentence(self, encoding, break_on_eos=False, join=True):
         sentence = []
@@ -115,7 +115,6 @@ class Tokenizer(object):
                 break
             else:
                 sentence.append(self.vocab[ix])
-        sentence = sentence[::-1]
         if join:
             return " ".join(sentence)
         return sentence

@@ -168,7 +168,7 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits, batch
     setup()
     image_features = ImageFeatures.from_args(args)
     vocab = read_vocab(train_vocab_path)
-    tok = Tokenizer(vocab=vocab, encoding_length=MAX_INPUT_LENGTH)
+    tok = Tokenizer(vocab=vocab)
     train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if args.bidirectional else hidden_size
@@ -195,12 +195,12 @@ def train_setup(args, batch_size=BATCH_SIZE):
         vocab = SUBTRAIN_VOCAB
 
     train_env, val_envs, encoder, decoder = make_env_and_models(args, vocab, train_splits, val_splits, batch_size=batch_size)
-    agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len)
+    agent = Seq2SeqAgent(train_env, "", encoder, decoder, max_episode_len, max_instruction_length=MAX_INPUT_LENGTH)
     return agent, train_env, val_envs
 
 def test_setup(args, batch_size=BATCH_SIZE):
     train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
-    agent = Seq2SeqAgent(None, "", encoder, decoder, max_episode_len)
+    agent = Seq2SeqAgent(None, "", encoder, decoder, max_episode_len, max_instruction_length=MAX_INPUT_LENGTH)
     return agent, train_env, test_envs
 
 def train_val(args):
