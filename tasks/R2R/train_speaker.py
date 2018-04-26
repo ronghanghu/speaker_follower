@@ -74,7 +74,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
     split_string = "-".join(train_env.splits)
 
     def make_path(iter):
-        return os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
+        return os.path.join(args.snapshot_dir, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
 
     best_metrics = {}
     last_model_saved = {}
@@ -103,7 +103,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
             val_loss_avg = np.average(val_losses)
             data_log['%s loss' % env_name].append(val_loss_avg)
 
-            agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), env_name, iter)
+            agent.results_path = '%s%s_%s_iter_%d.json' % (args.result_dir, get_model_prefix(args), env_name, iter)
             # Get validation distance from goal under test evaluation conditions
             results = agent.test(use_dropout=False, feedback='argmax')
             agent.write_results()
@@ -138,7 +138,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
 
         df = pd.DataFrame(data_log)
         df.set_index('iteration')
-        df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args))
+        df_path = '%s%s_log.csv' % (args.plot_dir, get_model_prefix(args))
         df.to_csv(df_path)
 
 def setup():
@@ -154,7 +154,7 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     setup()
     image_features = ImageFeatures.from_args(args)
     vocab = read_vocab(train_vocab_path)
-    tok = Tokenizer(vocab=vocab, encoding_length=MAX_INSTRUCTION_LENGTH)
+    tok = Tokenizer(vocab=vocab)
     train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
@@ -200,7 +200,7 @@ def test_submission(args):
     test_env = test_envs['test']
     agent.env = test_env
 
-    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', 20000)
+    agent.results_path = '%s%s_%s_iter_%d.json' % (args.result_dir, get_model_prefix(args), 'test', 20000)
     agent.test(use_dropout=False, feedback='argmax')
     agent.write_results()
 
@@ -210,6 +210,9 @@ def make_arg_parser():
 
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     parser.add_argument("--n_iters", type=int, default=20000)
+    parser.add_argument("--result_dir", default=RESULT_DIR)
+    parser.add_argument("--snapshot_dir", default=SNAPSHOT_DIR)
+    parser.add_argument("--plot_dir", default=PLOT_DIR)
     return parser
 
 if __name__ == "__main__":

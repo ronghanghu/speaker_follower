@@ -12,9 +12,9 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import torch.distributions as D
 
-from utils import vocab_pad_idx, flatten, structured_map, try_cuda
+from utils import vocab_pad_idx, vocab_eos_idx, flatten, structured_map, try_cuda
 
-from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, index_action_tuple
+from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, LEFT_ACTION_INDEX, RIGHT_ACTION_INDEX, index_action_tuple
 
 InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, action_count, score")
 
@@ -36,22 +36,29 @@ def backchain_inference_states(last_inference_state):
     scores.append(last_score)
     return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:], list(reversed(scores))[1:] # exclude start action
 
-def batch_instructions_from_encoded(encoded_instructions):
-    # encoded_instructions: list of padded lists of token indices (must all be the same length, and padded with vocab_pad_idx at the end
-    seq_tensor = np.array(encoded_instructions)
+def batch_instructions_from_encoded(encoded_instructions, max_length, reverse=False):
+    # encoded_instructions: list of lists of token indices (should not be padded, or contain BOS or EOS tokens)
+    #seq_tensor = np.array(encoded_instructions)
     # make sure pad does not start any sentence
-    assert not any(seq_tensor[:,0] == vocab_pad_idx)
-    seq_lengths = np.argmax(seq_tensor == vocab_pad_idx, axis=1)
-    seq_lengths[seq_lengths == 0] = seq_tensor.shape[1] # Full length
+    num_instructions = len(encoded_instructions)
+    seq_tensor = np.full((num_instructions, max_length), vocab_pad_idx)
+    seq_lengths = []
+    for i, inst in enumerate(encoded_instructions):
+        assert inst[-1] != vocab_eos_idx
+        if reverse:
+            inst = inst[::-1]
+        inst = np.concatenate((inst, [vocab_eos_idx]))
+        inst = inst[:max_length]
+        seq_tensor[i,:len(inst)] = inst
+        seq_lengths.append(len(inst))
 
     seq_tensor = torch.from_numpy(seq_tensor)
-    seq_lengths = torch.from_numpy(seq_lengths)
 
-    mask = (seq_tensor == vocab_pad_idx)[:, :seq_lengths[0]]
+    mask = (seq_tensor == vocab_pad_idx)[:, :max(seq_lengths)]
 
     return try_cuda(Variable(seq_tensor, requires_grad=False).long()), \
            try_cuda(mask.byte()), \
-           list(seq_lengths)
+           seq_lengths
 
 class BaseAgent(object):
     ''' Base class for an R2R agent to generate and save trajectories. '''
@@ -203,7 +210,7 @@ class Seq2SeqAgent(BaseAgent):
     end_index = model_actions.index('<end>')
     feedback_options = ['teacher', 'argmax', 'sample']
 
-    def __init__(self, env, results_path, encoder, decoder, episode_len=20, beam_size=1):
+    def __init__(self, env, results_path, encoder, decoder, episode_len=20, beam_size=1, reverse_instruction=True, max_instruction_length=80):
         super(Seq2SeqAgent, self).__init__(env, results_path)
         self.encoder = encoder
         self.decoder = decoder
@@ -211,6 +218,8 @@ class Seq2SeqAgent(BaseAgent):
         self.losses = []
         self.criterion = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
         self.beam_size = beam_size
+        self.reverse_instruction = reverse_instruction
+        self.max_instruction_length = max_instruction_length
 
     @staticmethod
     def n_inputs():
@@ -239,7 +248,7 @@ class Seq2SeqAgent(BaseAgent):
 
     def _proc_batch(self, obs, beamed=False):
         encoded_instructions = [ob['instr_encoding'] for ob in (flatten(obs) if beamed else obs)]
-        return batch_instructions_from_encoded(encoded_instructions)
+        return batch_instructions_from_encoded(encoded_instructions, self.max_instruction_length, reverse=self.reverse_instruction)
 
     def rollout(self):
         if self.beam_size == 1:
@@ -358,7 +367,7 @@ class Seq2SeqAgent(BaseAgent):
         self.losses.append(self.loss.data[0])
         return traj
 
-    def beam_search(self, beam_size, load_next_minibatch=True):
+    def beam_search(self, beam_size, load_next_minibatch=True, mask_undo=False):
         assert self.env.beam_size >= beam_size
         world_states = self.env.reset(sort=True, beamed=True, load_next_minibatch=load_next_minibatch)
         obs = self.env.observe(world_states, beamed=True)
@@ -407,9 +416,28 @@ class Seq2SeqAgent(BaseAgent):
             # Mask outputs where agent can't move forward
             no_forward_mask = [len(ob['navigableLocations']) <= 1 for ob in flat_obs]
 
+            if mask_undo:
+                masked_logit = logit.clone()
+            else:
+                masked_logit = logit
+
+            invalid_actions = []
             for i,no_forward in enumerate(no_forward_mask):
+                this_invalid = set()
                 if no_forward:
                     logit[i, self.forward_index] = -float('inf')
+                    if mask_undo:
+                        masked_logit[i, self.forward_index] = -float('inf')
+                    this_invalid.add(self.forward_index)
+                if mask_undo:
+                    last_action = a_t_list[i]
+                    if last_action == LEFT_ACTION_INDEX:
+                        masked_logit[i, RIGHT_ACTION_INDEX] = -float('inf')
+                        this_invalid.add(RIGHT_ACTION_INDEX)
+                    elif last_action == RIGHT_ACTION_INDEX:
+                        masked_logit[i, LEFT_ACTION_INDEX] = -float('inf')
+                        this_invalid.add(LEFT_ACTION_INDEX)
+                invalid_actions.append(this_invalid)
 
             log_probs = F.log_softmax(logit, dim=1).data
 
@@ -418,7 +446,9 @@ class Seq2SeqAgent(BaseAgent):
             #     action_scores = log_probs[:,self.end_index].unsqueeze(-1)
             #     action_indices = torch.from_numpy(np.full((log_probs.size()[0], 1), self.end_index))
             # else:
-            action_scores, action_indices = log_probs.topk(min(beam_size, logit.size()[1]), dim=1)
+            #action_scores, action_indices = log_probs.topk(min(beam_size, logit.size()[1]), dim=1)
+            _, action_indices = masked_logit.data.topk(min(beam_size, logit.size()[1]), dim=1)
+            action_scores = log_probs.gather(1, action_indices)
             assert action_scores.size() == action_indices.size()
 
             start_index = 0
@@ -434,7 +464,8 @@ class Seq2SeqAgent(BaseAgent):
                             enumerate(zip(beam, beam_world_states, action_scores[start_index:end_index], action_indices[start_index:end_index])):
                         for action_score, action_index in zip(action_score_row, action_index_row):
                             flat_index = start_index + inf_index
-                            if no_forward_mask[flat_index] and action_index == self.forward_index:
+                            if action_index in invalid_actions[flat_index]:
+                            #if no_forward_mask[flat_index] and action_index == self.forward_index:
                                 continue
                             successors.append(
                                 InferenceState(prev_inference_state=inf_state,
