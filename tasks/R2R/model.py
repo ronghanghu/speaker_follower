@@ -109,14 +109,14 @@ class SoftDotAttention(nn.Module):
 
 
 class FeedforwardImageAttention(nn.Module):
-    def __init__(self, feature_size, context_size, attention_size):
+    def __init__(self, context_size, hidden_size, image_feature_size=2048):
         super(FeedforwardImageAttention, self).__init__()
-        self.feature_size = feature_size
+        self.feature_size = image_feature_size
         self.context_size = context_size
-        self.attention_size = attention_size
-        self.fc1_feature = nn.Conv2d(feature_size, attention_size, kernel_size=1, bias=False)
-        self.fc1_context = nn.Linear(context_size, attention_size, bias=True)
-        self.fc2 = nn.Conv2d(attention_size, 1, kernel_size=1, bias=True)
+        self.hidden_size = hidden_size
+        self.fc1_feature = nn.Conv2d(image_feature_size, hidden_size, kernel_size=1, bias=False)
+        self.fc1_context = nn.Linear(context_size, hidden_size, bias=True)
+        self.fc2 = nn.Conv2d(hidden_size, 1, kernel_size=1, bias=True)
 
     def forward(self, feature, context):
         batch_size = feature.shape[0]
@@ -131,26 +131,64 @@ class FeedforwardImageAttention(nn.Module):
         return x.squeeze(-1), attention.squeeze(-1)
 
 class MultiplicativeImageAttention(nn.Module):
-    def __init__(self, feature_size, context_size, attention_size):
+    def __init__(self, context_size, hidden_size, image_feature_size=2048):
         super(MultiplicativeImageAttention, self).__init__()
-        self.feature_size = feature_size
+        self.feature_size = image_feature_size
         self.context_size = context_size
-        self.attention_size = attention_size
-        self.fc1_feature = nn.Conv2d(feature_size, attention_size, kernel_size=1, bias=True)
-        self.fc1_context = nn.Linear(context_size, attention_size, bias=True)
-        self.fc2 = nn.Conv2d(attention_size, 1, kernel_size=1, bias=True)
+        self.hidden_size = hidden_size
+        self.fc1_feature = nn.Conv2d(image_feature_size, hidden_size, kernel_size=1, bias=True)
+        self.fc1_context = nn.Linear(context_size, hidden_size, bias=True)
+        self.fc2 = nn.Conv2d(hidden_size, 1, kernel_size=1, bias=True)
 
     def forward(self, feature, context):
         batch_size = feature.shape[0]
-        feature_hidden = self.fc1_feature(feature) # batch_size x attention_size x width x height
-        context_hidden = self.fc1_context(context) # batch_size x attention_size
-        context_hidden = context_hidden.unsqueeze(-2) # batch_size x 1 x attention_size
-        feature_hidden = feature_hidden.view(batch_size, self.attention_size, -1) # batch_size x attention_size x (width * height)
+        feature_hidden = self.fc1_feature(feature) # batch_size x hidden_size x width x height
+        context_hidden = self.fc1_context(context) # batch_size x hidden_size
+        context_hidden = context_hidden.unsqueeze(-2) # batch_size x 1 x hidden_size
+        feature_hidden = feature_hidden.view(batch_size, self.hidden_size, -1) # batch_size x hidden_size x (width * height)
         x = torch.bmm(context_hidden, feature_hidden) # batch_size x 1 x (width x height)
         attention = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1) # batch_size x (width * height) x 1
         reshaped_features = feature.view(batch_size, self.feature_size, -1) # batch_size x feature_size x (width * height)
         x = torch.bmm(reshaped_features, attention) # batch_size x
         return x.squeeze(-1), attention.squeeze(-1)
+
+class BottomUpImageAttention(nn.Module):
+    def __init__(self, context_size, object_embedding_size, attribute_embedding_size, hidden_size, num_objects, num_attributes, image_feature_size=2048):
+        super(BottomUpImageAttention, self).__init__()
+        self.context_size = context_size
+        self.object_embedding_size = object_embedding_size
+        self.attribute_embedding_size = attribute_embedding_size
+        self.hidden_size = hidden_size
+        self.num_objects = num_objects
+        self.num_attributes = num_attributes
+        self.feature_size = image_feature_size + object_embedding_size + attribute_embedding_size + 1 + 4
+
+        self.object_embedding = nn.Embedding(num_objects, object_embedding_size)
+        self.attribute_embedding = nn.Embedding(num_attributes, attribute_embedding_size)
+
+        self.fc1_context = nn.Linear(context_size, hidden_size)
+        self.fc1_feature = nn.Linear(self.feature_size, hidden_size)
+        #self.fc1 = nn.Linear(context_size + self.feature_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, 1)
+
+    def forward(self, bottom_up_features, context):
+        # image_features: batch_size x max_num_detections x feature_size
+        # object_ids: batch_size x max_num_detections
+        # attribute_ids: batch_size x max_num_detections
+        # no_object_mask: batch_size x max_num_detections
+        # context: batch_size x context_size
+        attribute_embedding = self.attribute_embedding(bottom_up_features.attribute_indices) # batch_size x max_num_detections x embedding_size
+        object_embedding = self.object_embedding(bottom_up_features.object_indices) # batch_size x max_num_detections x embedding_size
+        feats = torch.cat((bottom_up_features.cls_prob.unsqueeze(2), bottom_up_features.image_features, attribute_embedding, object_embedding, bottom_up_features.boxes), dim=2) # batch_size x max_num_detections x (feat size)
+        x_context = self.fc1_context(context).unsqueeze(1) # batch_size x 1 x hidden_size
+        x_feature = self.fc1_feature(feats) # batch_size x max_num_detections x hidden_size
+        x = x_context + x_feature # batch_size x max_num_detections x hidden_size
+        x = F.relu(x)
+        x = self.fc2(x).squeeze(-1) # batch_size x max_num_detections
+        x.data.masked_fill_(bottom_up_features.no_object_mask, -float("-inf"))
+        attention = F.softmax(x, 1).unsqueeze(1) # batch_size x 1 x max_num_detections
+        attended_feats = torch.bmm(attention, feats).squeeze(1) # batch_size x feat_size
+        return attended_feats, attention
 
 class AttnDecoderLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''

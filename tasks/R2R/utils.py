@@ -163,6 +163,12 @@ def timeSince(since, percent):
     rs = es - s
     return '%s (- %s)' % (asMinutes(s), asMinutes(rs))
 
+def k_best_indices(arr, k, sorted=False):
+    # https://stackoverflow.com/a/23734295
+    ind = np.argpartition(arr, -k)[-k:]
+    if sorted:
+        ind = ind[np.argsort(arr[ind])]
+    return ind
 
 def structured_map(function, *args, **kwargs):
     #assert all(len(a) == len(args[0]) for a in args[1:])

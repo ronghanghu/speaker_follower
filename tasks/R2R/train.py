@@ -159,9 +159,13 @@ def make_image_attention_layer(args, image_features):
         return None
     image_attention_size = args.image_attention_size or hidden_size
     if args.image_attention_type == 'feedforward':
-        return model.FeedforwardImageAttention(image_features.feature_dim, hidden_size, image_attention_size)
+        return model.FeedforwardImageAttention(hidden_size, image_attention_size, image_feature_size=image_features.feature_dim)
     elif args.image_attention_type == 'multiplicative':
-        return model.MultiplicativeImageAttention(image_features.feature_dim, hidden_size, image_attention_size)
+        return model.MultiplicativeImageAttention(hidden_size, image_attention_size, image_feature_size=image_features.feature_dim)
+    elif args.image_attention_type == 'bottom_up':
+        return model.BottomUpImageAttention(hidden_size, args.bottom_up_detection_embedding_size, args.bottom_up_detection_embedding_size, image_attention_size, image_features.num_objects, image_features.num_attributes, image_features.feature_dim)
+    else:
+        raise ValueError("invalid --image_attention_type {}".format(args.image_attention_type))
 
 
 def make_env_and_models(args, train_vocab_path, train_splits, test_splits, batch_size=BATCH_SIZE):
@@ -174,11 +178,16 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits, batch
     enc_hidden_size = hidden_size//2 if args.bidirectional else hidden_size
     encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, vocab_pad_idx,
                                    dropout_ratio, bidirectional=args.bidirectional))
+    image_attention_layer = make_image_attention_layer(args, image_features)
+    if image_attention_layer:
+        feature_size = image_attention_layer.feature_size
+    else:
+        feature_size = image_features.feature_dim
     decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
                                        action_embedding_size, hidden_size, dropout_ratio,
-                                       feature_size=image_features.feature_dim,
+                                       feature_size=feature_size,
                                        ablate_image_features=image_features.image_feature_type == "none",
-                                       image_attention_layer=make_image_attention_layer(args, image_features)))
+                                       image_attention_layer=image_attention_layer))
     test_envs = {split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
                 for split in test_splits}
     return train_env, test_envs, encoder, decoder

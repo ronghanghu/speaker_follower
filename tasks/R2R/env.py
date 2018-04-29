@@ -13,20 +13,28 @@ import functools
 import os.path
 import time
 import paths
+import pickle
 
 from collections import namedtuple, defaultdict
 
-from utils import load_datasets, load_nav_graphs, structured_map, vocab_pad_idx, decode_base64
+from utils import load_datasets, load_nav_graphs, structured_map, vocab_pad_idx, decode_base64, k_best_indices, try_cuda
+
+import torch
+from torch.autograd import Variable
 
 csv.field_size_limit(sys.maxsize)
 
 FOLLOWER_MODEL_ACTIONS = ['left', 'right', 'up', 'down', 'forward', '<end>', '<start>', '<ignore>']
 
-END_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<end>")
-IGNORE_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<ignore>")
-
 LEFT_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("left")
 RIGHT_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("right")
+UP_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("up")
+DOWN_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("down")
+FORWARD_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("forward")
+END_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<end>")
+START_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<start>")
+IGNORE_ACTION_INDEX = FOLLOWER_MODEL_ACTIONS.index("<ignore>")
+
 
 FOLLOWER_ENV_ACTIONS = [
     (0,-1, 0), # left
@@ -42,6 +50,8 @@ FOLLOWER_ENV_ACTIONS = [
 assert len(FOLLOWER_MODEL_ACTIONS) == len(FOLLOWER_ENV_ACTIONS)
 
 WorldState = namedtuple("WorldState", ["scanId", "viewpointId", "heading", "elevation"])
+
+BottomUpViewpoint = namedtuple("BottomUpViewpoint", ["cls_prob", "image_features", "attribute_indices", "object_indices", "boxes", "no_object_mask"])
 
 def load_world_state(sim, world_state):
     sim.newEpisode(*world_state)
@@ -99,10 +109,12 @@ class ImageFeatures(object):
     NUM_VIEWS = 36
     MEAN_POOLED_DIM = 2048
 
-    def __init__(self, image_feature_type, image_feature_datasets):
+    def __init__(self, image_feature_type, image_feature_datasets, split_convolutional_features=True, downscale_convolutional_features=True):
         self.image_feature_type = image_feature_type
         image_feature_datasets = sorted(image_feature_datasets)
         self.image_feature_datasets = image_feature_datasets
+        self.split_convolutional_features = split_convolutional_features
+        self.downscale_convolutional_features = downscale_convolutional_features
 
         self.convolutional_feature_stores = [paths.convolutional_feature_store_paths[dataset]
                                              for dataset in image_feature_datasets]
@@ -129,7 +141,10 @@ class ImageFeatures(object):
                 for long_id, feats in self.features.items()
             }
         else:
-            print('Image features not provided')
+            if image_feature_type == 'attention':
+                print("Will load convolutional or bottom_up features on demand")
+            else:
+                print('Image features not provided')
             self.feature_dim = ImageFeatures.MEAN_POOLED_DIM
             self.features = np.zeros(self.feature_dim, dtype=np.float32)
             self.image_w = 640
@@ -138,14 +153,19 @@ class ImageFeatures(object):
 
     @staticmethod
     def from_args(args):
-        return ImageFeatures(args.image_feature_type, args.image_feature_datasets)
+        if args.image_feature_type == "attention" and args.image_attention_type == "bottom_up":
+            return BottomUpImageFeatures(args.bottom_up_detections)
+        else:
+            return ImageFeatures(args.image_feature_type, args.image_feature_datasets)
 
     @staticmethod
     def add_args(argument_parser):
         argument_parser.add_argument("--image_feature_type", choices=["mean_pooled", "none", "attention"], default="mean_pooled")
-        argument_parser.add_argument("--image_attention_type", choices=["feedforward", "multiplicative"], default="feedforward")
+        argument_parser.add_argument("--image_attention_type", choices=["feedforward", "multiplicative", "bottom_up"], default="feedforward")
         argument_parser.add_argument("--image_attention_size", type=int)
         argument_parser.add_argument("--image_feature_datasets", nargs="+", default=["imagenet"], help="{imagenet,places365}")
+        argument_parser.add_argument("--bottom_up_detections", type=int, default=10)
+        argument_parser.add_argument("--bottom_up_detection_embedding_size", type=int, default=20)
 
     @staticmethod
     def get_name(args):
@@ -153,19 +173,31 @@ class ImageFeatures(object):
             return args.image_feature_type
         name = '+'.join(sorted(args.image_feature_datasets))
         if args.image_feature_type == "attention":
-            name = name + "_attention"
+            name = name + "_" + args.image_attention_type + "_attention"
+            if args.image_attention_type == "bottom_up":
+                name = name + "_d={}".format(args.bottom_up_detections)
         return name
 
     def _make_id(self, scanId, viewpointId):
         return scanId + '_' + viewpointId
 
-        #@functools.lru_cache(maxsize=3000)
+    def batch_features(self, feature_list):
+        features = np.stack(feature_list)
+        return try_cuda(Variable(torch.from_numpy(features), requires_grad=False))
+
+    @functools.lru_cache(maxsize=3000)
     def _get_convolutional_features(self, scanId, viewpointId, viewIndex):
         feats = []
         for cfs in self.convolutional_feature_stores:
-            path = os.path.join(cfs, scanId, "%s.npy" % viewpointId)
-            mmapped = np.load(path, mmap_mode='r')
-            feats.append(mmapped[viewIndex,:,:,:])
+            if self.split_convolutional_features:
+                path = os.path.join(cfs, scanId, "{}_{}{}.npy".format(viewpointId, viewIndex, "_downscaled" if self.downscale_convolutional_features else ""))
+                this_feats = np.load(path)
+            else:
+                # memmap for loading subfeatures
+                path = os.path.join(cfs, scanId, "%s.npy" % viewpointId)
+                mmapped = np.load(path, mmap_mode='r')
+                this_feats = mmapped[viewIndex,:,:,:]
+            feats.append(this_feats)
         if len(feats) > 1:
             return np.concatenate(feats, axis=1)
         return feats[0]
@@ -179,6 +211,115 @@ class ImageFeatures(object):
         else:
             assert self.image_feature_type == 'none'
             return self.features
+
+def read_visual_genome_vocab(fname, pad_name, add_null=False):
+    # one-to-many mapping from indices to names (synonyms)
+    index_to_items = []
+    item_to_index = {}
+    start_ix = 0
+    items_to_add = [pad_name]
+    if add_null:
+        null_tp = ()
+        items_to_add.append(null_tp)
+    for item in items_to_add:
+        index_to_items.append(item)
+        item_to_index[item] = start_ix
+        start_ix += 1
+
+    with open(fname) as f:
+        for index, line in enumerate(f):
+            this_items = []
+            for synonym in line.split(','):
+                item = tuple(synonym.split())
+                this_items.append(item)
+                item_to_index[item] = index + start_ix
+            index_to_items.append(this_items)
+    assert len(index_to_items) == max(item_to_index.values()) + 1
+    return index_to_items, item_to_index
+
+class BottomUpImageFeatures(ImageFeatures):
+    PAD_ITEM = ("<pad>",)
+    feature_dim = 2048
+
+    def __init__(self, number_of_detections):
+        super(BottomUpImageFeatures, self).__init__("bottom_up", [])
+        self.number_of_detections = number_of_detections
+        self.index_to_attributes, self.attribute_to_index = read_visual_genome_vocab(paths.bottom_up_attribute_path, BottomUpImageFeatures.PAD_ITEM, add_null=True)
+        self.index_to_objects, self.object_to_index = read_visual_genome_vocab(paths.bottom_up_object_path, BottomUpImageFeatures.PAD_ITEM, add_null=False)
+
+        self.num_attributes = len(self.index_to_attributes)
+        self.num_objects = len(self.index_to_objects)
+
+        self.attribute_pad_index = self.attribute_to_index[BottomUpImageFeatures.PAD_ITEM]
+        self.object_pad_index = self.object_to_index[BottomUpImageFeatures.PAD_ITEM]
+
+
+    def batch_features(self, feature_list):
+        def transform(lst, wrap_with_var=True):
+            features = np.stack(lst)
+            x = torch.from_numpy(features)
+            if wrap_with_var:
+                x = Variable(x, requires_grad=False)
+            return try_cuda(x)
+
+        return BottomUpViewpoint(
+            cls_prob=transform([f.cls_prob for f in feature_list]),
+            image_features=transform([f.image_features for f in feature_list]),
+            attribute_indices=transform([f.attribute_indices for f in feature_list]),
+            object_indices=transform([f.object_indices for f in feature_list]),
+            boxes=transform([f.boxes for f in feature_list]),
+            no_object_mask=transform([f.no_object_mask for f in feature_list], wrap_with_var=False),
+        )
+
+    def parse_attribute_objects(self, tokens):
+        parse_options = []
+        # allow blank attribute, but not blank object
+        for split_point in range(0, len(tokens)):
+            attr_tokens = tuple(tokens[:split_point])
+            obj_tokens = tuple(tokens[split_point:])
+            if attr_tokens in self.attribute_to_index and obj_tokens in self.object_to_index:
+                parse_options.append((self.attribute_to_index[attr_tokens], self.object_to_index[obj_tokens]))
+        assert parse_options, "didn't find any parses for {}".format(tokens)
+        # prefer longer objects, e.g. "electrical outlet" over "electrical" "outlet"
+        return parse_options[0]
+
+    @functools.lru_cache(maxsize=20000)
+    def _get_viewpoint_features(self, scan_id, viewpoint_id):
+        fname = os.path.join(paths.bottom_up_feature_store_path, scan_id, "{}.p".format(viewpoint_id))
+        with open(fname, 'rb') as f:
+            data = pickle.load(f, encoding='latin1')
+
+        viewpoint_features = []
+        for viewpoint in data:
+            top_indices = k_best_indices(viewpoint['cls_prob'], self.number_of_detections, sorted=True)[::-1]
+
+            no_object = np.full(self.number_of_detections, True, dtype=np.uint8) # will become torch Byte tensor
+            no_object[0:len(top_indices)] = False
+
+            cls_prob = np.zeros(self.number_of_detections, dtype=np.float32)
+            cls_prob[0:len(top_indices)] = viewpoint['cls_prob'][top_indices]
+            assert cls_prob[0] == np.max(cls_prob)
+
+            image_features = np.zeros((self.number_of_detections, ImageFeatures.MEAN_POOLED_DIM), dtype=np.float32)
+            image_features[0:len(top_indices)] = viewpoint['features'][top_indices]
+
+            boxes = np.zeros((self.number_of_detections, 4), dtype=np.float32)
+            boxes[0:len(top_indices)] = viewpoint['boxes'][top_indices]
+
+            object_indices = np.full(self.number_of_detections, self.object_pad_index)
+            attribute_indices = np.full(self.number_of_detections, self.attribute_pad_index)
+
+            for i, ix in enumerate(top_indices):
+                attribute_ix, object_ix = self.parse_attribute_objects(list(viewpoint['captions'][ix].split()))
+                object_indices[i] = object_ix
+                attribute_indices[i] = attribute_ix
+
+            viewpoint_features.append(BottomUpViewpoint(cls_prob, image_features, attribute_indices, object_indices, boxes, no_object))
+        return viewpoint_features
+
+    def get_features(self, state):
+        viewpoint_features = self._get_viewpoint_features(state.scanId, state.location.viewpointId)
+        return viewpoint_features[state.viewIndex]
 
 class EnvBatch():
     ''' A simple wrapper for a batch of MatterSim environments,

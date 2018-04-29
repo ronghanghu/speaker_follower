@@ -7,3 +7,8 @@ mean_pooled_feature_store_paths = {
     'imagenet': 'img_features/ResNet-152-imagenet.tsv',
     'places365': 'img_features/ResNet-152-places365.tsv',
 }
+
+bottom_up_feature_store_path = "img_features/bottom_up_10_100"
+
+bottom_up_attribute_path = "data/visual_genome/attributes_vocab.txt"
+bottom_up_object_path = "data/visual_genome/objects_vocab.txt"

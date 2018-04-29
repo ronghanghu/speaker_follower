@@ -14,7 +14,7 @@ import torch.distributions as D
 
 from utils import vocab_pad_idx, vocab_eos_idx, flatten, structured_map, try_cuda
 
-from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, LEFT_ACTION_INDEX, RIGHT_ACTION_INDEX, index_action_tuple
+from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, LEFT_ACTION_INDEX, RIGHT_ACTION_INDEX, START_ACTION_INDEX, END_ACTION_INDEX, FORWARD_ACTION_INDEX, index_action_tuple
 
 InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, action_count, score")
 
@@ -202,12 +202,11 @@ class Seq2SeqAgent(BaseAgent):
     ''' An agent based on an LSTM seq2seq model with attention. '''
 
     # For now, the agent can't pick which forward move to make - just the one in the middle
-    model_actions = FOLLOWER_MODEL_ACTIONS
     env_actions = FOLLOWER_ENV_ACTIONS
-    start_index = model_actions.index('<start>')
+    start_index = START_ACTION_INDEX
     ignore_index = IGNORE_ACTION_INDEX
-    forward_index = model_actions.index('forward')
-    end_index = model_actions.index('<end>')
+    forward_index = FORWARD_ACTION_INDEX
+    end_index = END_ACTION_INDEX
     feedback_options = ['teacher', 'argmax', 'sample']
 
     def __init__(self, env, results_path, encoder, decoder, episode_len=20, beam_size=1, reverse_instruction=True, max_instruction_length=80):
@@ -223,16 +222,16 @@ class Seq2SeqAgent(BaseAgent):
 
     @staticmethod
     def n_inputs():
-        return len(Seq2SeqAgent.model_actions)
+        return len(FOLLOWER_MODEL_ACTIONS)
 
     @staticmethod
     def n_outputs():
-        return len(Seq2SeqAgent.model_actions)-2 # Model doesn't output start or ignore
+        return len(FOLLOWER_MODEL_ACTIONS)-2 # Model doesn't output start or ignore
 
     def _feature_variable(self, obs, beamed=False):
         ''' Extract precomputed features into variable. '''
-        features = np.stack([ob['feature'] for ob in (flatten(obs) if beamed else obs)])
-        return try_cuda(Variable(torch.from_numpy(features), requires_grad=False))
+        feature_list = [ob['feature'] for ob in (flatten(obs) if beamed else obs)]
+        return self.env.image_features.batch_features(feature_list)
 
     def _teacher_action(self, obs, ended):
         ''' Extract teacher actions into variable. '''
@@ -272,95 +271,95 @@ class Seq2SeqAgent(BaseAgent):
 
         self.loss = 0
 
-        for feedback in self.feedback.split("+"):
-            ctx,h_t,c_t = self.encoder(seq, seq_lengths)
-            # Record starting point
-            traj = [{
-                'instr_id': ob['instr_id'],
-                'trajectory': [path_element_from_observation(ob)],
-                'actions': [],
-                'scores': [],
-                'observations': [ob],
-                'instr_encoding': ob['instr_encoding']
-            } for ob in initial_obs]
+        feedback = self.feedback
 
-            obs = initial_obs
-            world_states = initial_world_states
+        ctx,h_t,c_t = self.encoder(seq, seq_lengths)
+        # Record starting point
+        traj = [{
+            'instr_id': ob['instr_id'],
+            'trajectory': [path_element_from_observation(ob)],
+            'actions': [],
+            'scores': [],
+            'observations': [ob],
+            'instr_encoding': ob['instr_encoding']
+        } for ob in initial_obs]
 
-            # Initial action
-            a_t = try_cuda(Variable(torch.ones(batch_size).long() * self.model_actions.index('<start>'),
-                                    requires_grad=False))
-            ended = np.array([False] * batch_size) # Indices match permuation of the model, not env
+        obs = initial_obs
+        world_states = initial_world_states
 
-            # Do a sequence rollout and calculate the loss
-            env_action = [None] * batch_size
-            sequence_scores = try_cuda(torch.zeros(batch_size))
-            for t in range(self.episode_len):
+        # Initial action
+        a_t = try_cuda(Variable(torch.ones(batch_size).long() * START_ACTION_INDEX,
+                                requires_grad=False))
+        ended = np.array([False] * batch_size) # Indices match permuation of the model, not env
 
-                f_t = self._feature_variable(obs) # Image features from obs
-                h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t, c_t, ctx, seq_mask)
-                # Mask outputs where agent can't move forward
-                blocked_indices = []
-                for i,ob in enumerate(obs):
-                    if len(ob['navigableLocations']) <= 1:
-                        blocked_indices.append(i)
-                        logit[i, self.model_actions.index('forward')] = -float('inf')
+        # Do a sequence rollout and calculate the loss
+        env_action = [None] * batch_size
+        sequence_scores = try_cuda(torch.zeros(batch_size))
+        for t in range(self.episode_len):
+            f_t = self._feature_variable(obs) # Image features from obs
+            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t, c_t, ctx, seq_mask)
+            # Mask outputs where agent can't move forward
+            blocked_indices = []
+            for i,ob in enumerate(obs):
+                if len(ob['navigableLocations']) <= 1:
+                    blocked_indices.append(i)
+                    logit[i, FORWARD_ACTION_INDEX] = -float('inf')
 
-                # Supervised training
-                target = self._teacher_action(obs, ended)
-                self.loss += self.criterion(logit, target)
+            # Supervised training
+            target = self._teacher_action(obs, ended)
+            self.loss += self.criterion(logit, target)
 
-                # Determine next model inputs
-                if feedback == 'teacher':
-                    a_t = target                # teacher forcing
-                elif feedback == 'argmax':
-                    _,a_t = logit.max(1)        # student forcing - argmax
-                    a_t = a_t.detach()
-                elif feedback == 'sample':
-                    probs = F.softmax(logit, dim=1)    # sampling an action from model
-                    m = D.Categorical(probs)
-                    sampled_blocked = True
-                    while sampled_blocked:
-                        a_t = m.sample()            # sampling an action from model
-                        if blocked_indices:
-                            sampled_blocked = any(a_t.data[blocked_indices] == self.model_actions.index('forward'))
-                        else:
-                            sampled_blocked = False
-                    #a_t = probs.multinomial(1).detach().squeeze(-1)
-                else:
-                    sys.exit('Invalid feedback option')
+            # Determine next model inputs
+            if feedback == 'teacher':
+                a_t = target                # teacher forcing
+            elif feedback == 'argmax':
+                _,a_t = logit.max(1)        # student forcing - argmax
+                a_t = a_t.detach()
+            elif feedback == 'sample':
+                probs = F.softmax(logit, dim=1)    # sampling an action from model
+                m = D.Categorical(probs)
+                sampled_blocked = True
+                while sampled_blocked:
+                    a_t = m.sample()            # sampling an action from model
+                    if blocked_indices:
+                        sampled_blocked = any(a_t.data[blocked_indices] == FORWARD_ACTION_INDEX)
+                    else:
+                        sampled_blocked = False
+                #a_t = probs.multinomial(1).detach().squeeze(-1)
+            else:
+                sys.exit('Invalid feedback option')
 
-                action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
-                sequence_scores += action_scores
+            action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
+            sequence_scores += action_scores
 
-                # dfried: I changed this so that the ended list is updated afterward; this causes <end> to be added as the last action, along with its score, and the final world state will be duplicated (to more closely match beam search)
-                # Make environment action
-                for i in range(batch_size):
-                    action_idx = a_t[i].data[0]
-                    env_action[i] = self.env_actions[action_idx]
+            # dfried: I changed this so that the ended list is updated afterward; this causes <end> to be added as the last action, along with its score, and the final world state will be duplicated (to more closely match beam search)
+            # Make environment action
+            for i in range(batch_size):
+                action_idx = a_t[i].data[0]
+                env_action[i] = self.env_actions[action_idx]
 
-                world_states = self.env.step(world_states, env_action)
-                obs = self.env.observe(world_states)
-                # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
+            world_states = self.env.step(world_states, env_action)
+            obs = self.env.observe(world_states)
+            # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
 
-                # Save trajectory output
-                for i,ob in enumerate(obs):
-                    if not ended[i]:
-                        traj[i]['trajectory'].append(path_element_from_observation(ob))
-                        traj[i]['score'] = sequence_scores[i]
-                        traj[i]['scores'].append(action_scores[i])
-                        traj[i]['actions'].append(a_t.data[i])
-                        traj[i]['observations'].append(ob)
+            # Save trajectory output
+            for i,ob in enumerate(obs):
+                if not ended[i]:
+                    traj[i]['trajectory'].append(path_element_from_observation(ob))
+                    traj[i]['score'] = sequence_scores[i]
+                    traj[i]['scores'].append(action_scores[i])
+                    traj[i]['actions'].append(a_t.data[i])
+                    traj[i]['observations'].append(ob)
 
-                # Update ended list
-                for i in range(batch_size):
-                    action_idx = a_t[i].data[0]
-                    if action_idx == self.model_actions.index('<end>'):
-                        ended[i] = True
+            # Update ended list
+            for i in range(batch_size):
+                action_idx = a_t[i].data[0]
+                if action_idx == END_ACTION_INDEX:
+                    ended[i] = True
 
-                # Early exit if all ended
-                if ended.all():
-                    break
+            # Early exit if all ended
+            if ended.all():
+                break
 
         #self.losses.append(self.loss.data[0] / self.episode_len)
         # shouldn't divide by the episode length because of masking
