@@ -154,7 +154,7 @@ class ImageFeatures(object):
     @staticmethod
     def from_args(args):
         if args.image_feature_type == "attention" and args.image_attention_type == "bottom_up":
-            return BottomUpImageFeatures(args.bottom_up_detections)
+            return BottomUpImageFeatures(args.bottom_up_detections, precomputed_cache_path=paths.bottom_up_feature_cache_path)
         else:
             return ImageFeatures(args.image_feature_type, args.image_feature_datasets)
 
@@ -241,7 +241,7 @@ class BottomUpImageFeatures(ImageFeatures):
     PAD_ITEM = ("<pad>",)
     feature_dim = 2048
 
-    def __init__(self, number_of_detections):
+    def __init__(self, number_of_detections, precomputed_cache_path=None):
         super(BottomUpImageFeatures, self).__init__("bottom_up", [])
         self.number_of_detections = number_of_detections
         self.index_to_attributes, self.attribute_to_index = read_visual_genome_vocab(paths.bottom_up_attribute_path, BottomUpImageFeatures.PAD_ITEM, add_null=True)
@@ -252,6 +252,23 @@ class BottomUpImageFeatures(ImageFeatures):
 
         self.attribute_pad_index = self.attribute_to_index[BottomUpImageFeatures.PAD_ITEM]
         self.object_pad_index = self.object_to_index[BottomUpImageFeatures.PAD_ITEM]
+
+        if precomputed_cache_path:
+            self.precomputed_cache = {}
+            with open(precomputed_cache_path, 'rb') as f:
+                data = pickle.load(f)
+                for (key, viewpoints) in data.items():
+                    assert len(viewpoints) == ImageFeatures.NUM_VIEWS
+                    viewpoint_feats = []
+                    for viewpoint in viewpoints:
+                        params = {}
+                        for param_key, param_value in viewpoint.items():
+                            assert len(param_value) >= self.number_of_detections
+                            params[param_key] = param_value[:self.number_of_detections]
+                        viewpoint_feats.append(BottomUpViewpoint(**params))
+                    self.precomputed_cache[key] = viewpoint_feats
+        else:
+            self.precomputed_cache = None
 
 
     def batch_features(self, feature_list):
@@ -285,6 +302,9 @@ class BottomUpImageFeatures(ImageFeatures):
 
     @functools.lru_cache(maxsize=20000)
     def _get_viewpoint_features(self, scan_id, viewpoint_id):
+        if self.precomputed_cache is not None:
+            return self.precomputed_cache[(scan_id, viewpoint_id)]
+
         fname = os.path.join(paths.bottom_up_feature_store_path, scan_id, "{}.p".format(viewpoint_id))
         with open(fname, 'rb') as f:
             data = pickle.load(f, encoding='latin1')
