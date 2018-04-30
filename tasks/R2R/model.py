@@ -180,6 +180,10 @@ class BottomUpImageAttention(nn.Module):
         attribute_embedding = self.attribute_embedding(bottom_up_features.attribute_indices) # batch_size x max_num_detections x embedding_size
         object_embedding = self.object_embedding(bottom_up_features.object_indices) # batch_size x max_num_detections x embedding_size
         feats = torch.cat((bottom_up_features.cls_prob.unsqueeze(2), bottom_up_features.image_features, attribute_embedding, object_embedding, bottom_up_features.boxes), dim=2) # batch_size x max_num_detections x (feat size)
+
+        # attended_feats = feats.mean(dim=1)
+        # attention = None
+
         x_context = self.fc1_context(context).unsqueeze(1) # batch_size x 1 x hidden_size
         x_feature = self.fc1_feature(feats) # batch_size x max_num_detections x hidden_size
         x = x_context + x_feature # batch_size x max_num_detections x hidden_size

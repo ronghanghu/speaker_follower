@@ -105,12 +105,9 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
             agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), env_name, iter)
             # Get validation distance from goal under test evaluation conditions
             agent.test(use_dropout=False, feedback='argmax')
-            agent.write_results()
-            score_summary, _ = evaluator.score_file(agent.results_path)
-
-            # # TODO: testing code, remove
-            # score_summary_direct, _ = evaluator.score_results(agent.results)
-            # assert score_summary == score_summary_direct
+            if not args.no_save:
+                agent.write_results()
+            score_summary, _ = evaluator.score_results(agent.results)
 
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
             for metric,val in score_summary.items():
@@ -121,26 +118,28 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
                     key = (env_name, metric)
                     if key not in best_metrics or best_metrics[key] < val:
                         best_metrics[key] = val
-                        model_path = make_path(iter) + "_%s-%s=%.3f" % (env_name, metric, val)
-                        save_log.append("new best, saved model to %s" % model_path)
-                        agent.save(model_path)
-                        if key in last_model_saved:
-                            for old_model_path in agent._encoder_and_decoder_paths(last_model_saved[key]):
-                                os.remove(old_model_path)
-                        last_model_saved[key] = model_path
+                        if not args.no_save:
+                            model_path = make_path(iter) + "_%s-%s=%.3f" % (env_name, metric, val)
+                            save_log.append("new best, saved model to %s" % model_path)
+                            agent.save(model_path)
+                            if key in last_model_saved:
+                                for old_model_path in agent._encoder_and_decoder_paths(last_model_saved[key]):
+                                    os.remove(old_model_path)
+                            last_model_saved[key] = model_path
 
         print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/args.n_iters),
                                              iter, float(iter)/args.n_iters*100, loss_str)))
         for s in save_log:
             print(s)
 
-        if save_every and iter % save_every == 0:
-            agent.save(make_path(iter))
+        if not args.no_save:
+            if save_every and iter % save_every == 0:
+                agent.save(make_path(iter))
 
-        df = pd.DataFrame(data_log)
-        df.set_index('iteration')
-        df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args))
-        df.to_csv(df_path)
+            df = pd.DataFrame(data_log)
+            df.set_index('iteration')
+            df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args))
+            df.to_csv(df_path)
 
 def setup():
     torch.manual_seed(1)
@@ -227,7 +226,8 @@ def test_submission(args):
 
     agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', args.n_iters)
     agent.test(use_dropout=False, feedback='argmax')
-    agent.write_results()
+    if not args.no_save:
+        agent.write_results()
 
 
 def make_arg_parser():
@@ -236,6 +236,7 @@ def make_arg_parser():
     parser.add_argument("--feedback_method", choices=["sample", "teacher", "teacher+sample"], default="sample")
     parser.add_argument("--bidirectional", action='store_true')
     parser.add_argument("--n_iters", type=int, default=20000)
+    parser.add_argument("--no_save", action='store_true')
 
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     return parser
