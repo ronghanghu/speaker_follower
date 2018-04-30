@@ -553,7 +553,7 @@ class R2RBatch():
         ''' Take action (same interface as makeActions) '''
         return self.env.makeActions(world_states, actions, beamed=beamed)
 
-    def shortest_paths_to_goals(self, starting_world_states):
+    def shortest_paths_to_goals(self, starting_world_states, max_steps, expand_multistep_actions=True):
         world_states = starting_world_states
         obs = self.observe(world_states)
 
@@ -564,8 +564,10 @@ class R2RBatch():
             all_actions.append([])
 
         ended = np.array([False] * len(obs))
-        while True:
+        for t in range(max_steps):
             actions = [ob['teacher'] for ob in obs]
+            if expand_multistep_actions:
+                actions = [FOLLOWER_ENV_ACTIONS[index_action_tuple(a)] for a in actions]
             world_states = self.step(world_states, actions)
             obs = self.observe(world_states)
             for i,ob in enumerate(obs):
@@ -579,3 +581,9 @@ class R2RBatch():
             if ended.all():
                 break
         return all_obs, all_actions
+
+    def gold_obs_actions_and_instructions(self, max_steps, load_next_minibatch=True, expand_multistep_actions=True):
+        starting_world_states = self.reset(load_next_minibatch=load_next_minibatch)
+        path_obs, path_actions = self.shortest_paths_to_goals(starting_world_states, max_steps, expand_multistep_actions=expand_multistep_actions)
+        encoded_instructions = [obs[0]['instr_encoding'] for obs in path_obs]
+        return path_obs, path_actions, encoded_instructions

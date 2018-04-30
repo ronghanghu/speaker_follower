@@ -54,7 +54,7 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
             cand_actions.append(candidate['actions'])
             cand_instr.append(candidate['instr_encoding'])
 
-        speaker_scored_candidates, _ = speaker._rollout_with_instructions_obs_and_actions(cand_obs, cand_actions, cand_instr, feedback='teacher')
+        speaker_scored_candidates, _ = speaker._score_obs_actions_and_instructions(cand_obs, cand_actions, cand_instr, feedback='teacher')
         assert len(speaker_scored_candidates) == sum(len(l) for l in beam_candidates)
         start_index = 0
         for instance_candidates in beam_candidates:

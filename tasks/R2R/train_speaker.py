@@ -184,7 +184,7 @@ def train_setup(args):
 
 def test_setup(args):
     train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
-    agent = Seq2SeqSpeaker(None, "", encoder, decoder, MAX_INSTRUCTION_LENGTH)
+    agent = Seq2SeqSpeaker(None, "", encoder, decoder, MAX_INSTRUCTION_LENGTH, max_episode_len=max_episode_len)
     return agent, train_env, test_envs
 
 def train_val(args):

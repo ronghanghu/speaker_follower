@@ -101,25 +101,35 @@ class BaseAgent(object):
         while True:
             rollout_results = self.rollout()
             # if self.feedback == 'argmax':
-            #     beam_results = self.beam_search(1, load_next_minibatch=False)
-            #     assert len(rollout_results) == len(beam_results)
-            #     for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
-            #         assert rollout_traj['instr_id'] == beam_trajs[0]['instr_id']
-            #         assert rollout_traj['trajectory'] == beam_trajs[0]['trajectory']
-            #         assert np.allclose(rollout_traj['score'], beam_trajs[0]['score'])
-            #     print("passed check: beam_search with beam_size=1")
-            #
-            #     self.env.set_beam_size(10)
-            #     beam_results = self.beam_search(10, load_next_minibatch=False)
-            #     assert len(rollout_results) == len(beam_results)
-            #     for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
-            #         rollout_score = rollout_traj['score']
-            #         rollout_scores.append(rollout_score)
-            #         beam_score = beam_trajs[0]['score']
-            #         beam_10_scores.append(beam_score)
-            #         # assert rollout_score <= beam_score
-            #     self.env.set_beam_size(1)
-            #     # print("passed check: beam_search with beam_size=10")
+                # beam_results = self.beam_search(1, load_next_minibatch=False)
+                # assert len(rollout_results) == len(beam_results)
+                # for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
+                #     assert rollout_traj['instr_id'] == beam_trajs[0]['instr_id']
+                #     assert rollout_traj['trajectory'] == beam_trajs[0]['trajectory']
+                #     assert np.allclose(rollout_traj['score'], beam_trajs[0]['score'])
+                # print("passed check: beam_search with beam_size=1")
+                #
+                # self.env.set_beam_size(10)
+                # beam_results = self.beam_search(10, load_next_minibatch=False)
+                # assert len(rollout_results) == len(beam_results)
+                # for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
+                #     rollout_score = rollout_traj['score']
+                #     rollout_scores.append(rollout_score)
+                #     beam_score = beam_trajs[0]['score']
+                #     beam_10_scores.append(beam_score)
+                #     # assert rollout_score <= beam_score
+                # self.env.set_beam_size(1)
+                # # print("passed check: beam_search with beam_size=10")
+            # if self.feedback == 'teacher' and self.beam_size == 1:
+            #     rollout_loss = self.loss
+            #     path_obs, path_actions, encoded_instructions = self.env.gold_obs_actions_and_instructions(self.episode_len, load_next_minibatch=False)
+            #     for i in range(len(rollout_results)):
+            #         assert rollout_results[i]['actions'] == path_actions[i]
+            #         assert [o1['viewpoint'] == o2['viewpoint']
+            #                 for o1, o2 in zip(rollout_results[i]['observations'], path_obs[i])]
+            #     action_scores = self._score_obs_actions_and_instructions(path_obs, path_actions, encoded_instructions)
+            #     assert np.allclose(rollout_loss.data[0], self.loss.data[0])
+
             for result in rollout_results:
                 if result['instr_id'] in self.results:
                     looped = True
@@ -188,7 +198,7 @@ class ShortestAgent(BaseAgent):
     def rollout(self):
         world_states = self.env.reset()
         #obs = self.env.observe(world_states)
-        all_obs, all_actions = self.env.shortest_paths_to_goals(world_states)
+        all_obs, all_actions = self.env.shortest_paths_to_goals(world_states, 20)
         return [
             {
                 'instr_id': obs[0]['instr_id'],
@@ -256,6 +266,86 @@ class Seq2SeqAgent(BaseAgent):
             assert self.beam_size >= 1
             beams = self.beam_search(self.beam_size)
             return [beam[0] for beam in beams]
+
+    def _score_obs_actions_and_instructions(self, path_obs, path_actions, encoded_instructions):
+        batch_size = len(path_obs)
+        assert len(path_actions) == batch_size
+        assert len(encoded_instructions) == batch_size
+        for path_o, path_a in zip(path_obs, path_actions):
+            assert len(path_o) == len(path_a) + 1
+
+        seq, seq_mask, seq_lengths = batch_instructions_from_encoded(encoded_instructions, self.max_instruction_length, reverse=self.reverse_instruction)
+        self.loss = 0
+
+        ctx, h_t, c_t = self.encoder(seq, seq_lengths)
+        a_t = try_cuda(Variable(torch.ones(batch_size).long() * START_ACTION_INDEX,
+                                requires_grad=False))
+        ended = np.array([False] * batch_size)
+        env_action = [None] * batch_size
+        sequence_scores = try_cuda(torch.zeros(batch_size))
+        all_action_scores = []
+        for _ in range(batch_size):
+            all_action_scores.append([])
+
+        obs = None
+        for t in range(self.episode_len):
+            next_obs = []
+            next_target_list = []
+            for i, (path_o, path_a) in enumerate(zip(path_obs, path_actions)):
+                if t < len(path_a):
+                    next_target_list.append(path_a[t])
+                    next_obs.append(path_o[t])
+                else:
+                    next_target_list.append(IGNORE_ACTION_INDEX)
+                    next_obs.append(obs[i])
+
+            obs = next_obs
+
+            target = try_cuda(Variable(torch.LongTensor(next_target_list), requires_grad=False))
+
+            f_t = self._feature_variable(obs) # Image features from obs
+            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t, c_t, ctx, seq_mask)
+            # Mask outputs where agent can't move forward
+            blocked_indices = []
+            for i,ob in enumerate(obs):
+                if len(ob['navigableLocations']) <= 1:
+                    blocked_indices.append(i)
+                    logit[i, FORWARD_ACTION_INDEX] = -float('inf')
+
+            # Supervised training
+            self.loss += self.criterion(logit, target)
+
+            # Determine next model inputs
+            a_t = target                # teacher forcing
+
+            action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
+            sequence_scores += action_scores
+
+            for i in range(batch_size):
+                action_idx = a_t[i].data[0]
+                env_action[i] = self.env_actions[action_idx]
+
+            # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
+
+            # Save trajectory output
+            for i,ob in enumerate(obs):
+                if not ended[i]:
+                    all_action_scores[i].append(action_scores[i])
+
+            # Update ended list
+            for i in range(batch_size):
+                action_idx = a_t[i].data[0]
+                if action_idx == END_ACTION_INDEX:
+                    ended[i] = True
+
+            # Early exit if all ended
+            if ended.all():
+                break
+
+        #self.losses.append(self.loss.data[0] / self.episode_len)
+        # shouldn't divide by the episode length because of masking
+        self.losses.append(self.loss.data[0])
+        return all_action_scores
 
     def _rollout_with_loss(self):
         initial_world_states = self.env.reset(sort=True)

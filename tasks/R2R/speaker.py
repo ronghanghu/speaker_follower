@@ -18,7 +18,7 @@ from follower import batch_instructions_from_encoded
 class Seq2SeqSpeaker(object):
     feedback_options = ['teacher', 'argmax', 'sample']
 
-    def __init__(self, env, results_path, encoder, decoder, instruction_len):
+    def __init__(self, env, results_path, encoder, decoder, instruction_len, max_episode_len=20):
         self.env = env
         self.results_path = results_path
         random.seed(1)
@@ -30,6 +30,7 @@ class Seq2SeqSpeaker(object):
         self.instruction_len = instruction_len
 
         self.losses = []
+        self.max_episode_len = max_episode_len
 
     def write_results(self):
         with open(self.results_path, 'w') as f:
@@ -90,7 +91,7 @@ class Seq2SeqSpeaker(object):
                encoded_instructions, \
                list(perm_indices)
 
-    def _rollout_with_instructions_obs_and_actions(self, path_obs, path_actions, encoded_instructions, feedback):
+    def _score_obs_actions_and_instructions(self, path_obs, path_actions, encoded_instructions, feedback):
         assert len(path_obs) == len(path_actions)
         assert len(path_obs) == len(encoded_instructions)
         start_obs, batched_image_features, batched_actions, path_mask, path_lengths, encoded_instructions, perm_indices = self._batch_observations_and_actions(path_obs, path_actions, encoded_instructions)
@@ -165,12 +166,9 @@ class Seq2SeqSpeaker(object):
             item['words'] = self.env.tokenizer.decode_sentence(item['word_indices'], break_on_eos=True, join=False)
         return outputs, loss
 
-    def rollout(self):
-        starting_world_states = self.env.reset()
-        path_obs, path_actions = self.env.shortest_paths_to_goals(starting_world_states)
-        encoded_instructions = [obs[0]['instr_encoding'] for obs in path_obs]
-
-        outputs, loss = self._rollout_with_instructions_obs_and_actions(path_obs, path_actions, encoded_instructions, self.feedback)
+    def rollout(self, load_next_minibatch=True):
+        path_obs, path_actions, encoded_instructions = self.env.gold_obs_actions_and_instructions(self.max_episode_len, load_next_minibatch=load_next_minibatch)
+        outputs, loss = self._score_obs_actions_and_instructions(path_obs, path_actions, encoded_instructions, self.feedback)
         self.loss = loss
         self.losses.append(loss.data[0])
         return outputs
