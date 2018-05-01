@@ -165,6 +165,11 @@ def timeSince(since, percent):
 
 def k_best_indices(arr, k, sorted=False):
     # https://stackoverflow.com/a/23734295
+    if k >= len(arr):
+        if sorted:
+            return np.argsort(arr)
+        else:
+            return np.arange(0, len(arr))
     ind = np.argpartition(arr, -k)[-k:]
     if sorted:
         ind = ind[np.argsort(arr[ind])]
@@ -202,6 +207,30 @@ def try_cuda(pytorch_obj):
 
 def pretty_json_dump(obj, fp):
     json.dump(obj, fp, sort_keys=True, indent=4, separators=(',', ':'))
+
+def spatial_feature_from_bbox(bboxes, im_h, im_w):
+    # from Ronghang Hu
+    # https://github.com/ronghanghu/cmn/blob/ff7d519b808f4b7619b17f92eceb17e53c11d338/models/spatial_feat.py
+
+    # Generate 5-dimensional spatial features from the image
+    # [xmin, ymin, xmax, ymax, S] where S is the area of the box
+    if isinstance(bboxes, list):
+        bboxes = np.array(bboxes)
+    bboxes = bboxes.reshape((-1, 4))
+    # Check the size of the bounding boxes
+    assert np.all(bboxes[:, 0:2] >= 0)
+    assert np.all(bboxes[:, 0] <= bboxes[:, 2])
+    assert np.all(bboxes[:, 1] <= bboxes[:, 3])
+    assert np.all(bboxes[:, 2] <= im_w)
+    assert np.all(bboxes[:, 3] <= im_h)
+
+    feats = np.zeros((bboxes.shape[0], 5), dtype=np.float32)
+    feats[:, 0] = bboxes[:, 0] * 2.0 / im_w - 1  # x1
+    feats[:, 1] = bboxes[:, 1] * 2.0 / im_h - 1  # y1
+    feats[:, 2] = bboxes[:, 2] * 2.0 / im_w - 1  # x2
+    feats[:, 3] = bboxes[:, 3] * 2.0 / im_h - 1  # y2
+    feats[:, 4] = (feats[:, 2] - feats[:, 0]) * (feats[:, 3] - feats[:, 1]) # S
+    return feats
 
 def run(arg_parser, entry_function):
     arg_parser.add_argument("--pdb", action='store_true')

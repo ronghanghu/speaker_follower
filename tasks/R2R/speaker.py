@@ -44,7 +44,9 @@ class Seq2SeqSpeaker(object):
 
     def _feature_variable(self, obs, beamed=False):
         ''' Extract precomputed features into variable. '''
-        features = np.stack([ob['feature'] for ob in (flatten(obs) if beamed else obs)])
+        features = [ob['feature'] for ob in (flatten(obs) if beamed else obs)]
+        assert all(len(f) == 1 for f in features)  #currently only support one image featurizer (without attention)
+        features = np.stack(features)
         return try_cuda(Variable(torch.from_numpy(features), requires_grad=False))
 
     def _batch_observations_and_actions(self, path_obs, path_actions, encoded_instructions):
@@ -56,7 +58,8 @@ class Seq2SeqSpeaker(object):
 
         path_obs = [path_obs[i] for i in perm_indices]
         path_actions = [path_actions[i] for i in perm_indices]
-        encoded_instructions = [encoded_instructions[i] for i in perm_indices]
+        if encoded_instructions:
+            encoded_instructions = [encoded_instructions[i] for i in perm_indices]
         seq_lengths = [seq_lengths[i] for i in perm_indices]
 
         for o, a in zip(path_obs, path_actions):
@@ -71,12 +74,15 @@ class Seq2SeqSpeaker(object):
             batched_actions[i,0:len(actions)] = actions #[index_action_tuple(tpl) for tpl in actions]
         batched_actions = torch.from_numpy(batched_actions).long()
 
-        image_feature_shape = path_obs[0][0]['feature'].shape
+        feature_list = path_obs[0][0]['feature']
+        assert len(feature_list) == 1
+        image_feature_shape = feature_list[0].shape
+
         batched_image_features = np.zeros((batch_size, max_path_length) + image_feature_shape, dtype='float32')
         for i, obs in enumerate(path_obs):
             # don't include the last state, which should result after the stop action
             obs = obs[:-1]
-            batched_image_features[i,0:len(obs)] = [ob['feature'] for ob in obs]
+            batched_image_features[i,0:len(obs)] = [ob['feature'][0] for ob in obs]
         batched_image_features = torch.from_numpy(batched_image_features)
 
         mask = (batched_actions == IGNORE_ACTION_INDEX).byte()
@@ -172,6 +178,65 @@ class Seq2SeqSpeaker(object):
         self.loss = loss
         self.losses.append(loss.data[0])
         return outputs
+
+    def beam_search(self, beam_size, path_obs, path_actions):
+        # TODO: here
+        assert len(path_obs) == len(path_actions)
+
+        start_obs, batched_image_features, batched_actions, path_mask, path_lengths, _, perm_indices = self._batch_observations_and_actions(path_obs, path_actions, None)
+
+        batch_size = len(start_obs)
+
+        ctx,h_t,c_t = self.encoder(batched_actions, batched_image_features, path_lengths)
+
+        w_t = try_cuda(Variable(torch.from_numpy(np.full((batch_size,), vocab_bos_idx, dtype='int64')).long(),
+                                requires_grad=False))
+        ended = np.array([False] * batch_size)
+
+        assert len(perm_indices) == batch_size
+        outputs = [None] * batch_size
+        for perm_index, src_index in enumerate(perm_indices):
+            outputs[src_index] = {
+                'instr_id': start_obs[perm_index]['instr_id'],
+                'word_indices': [],
+                #'actions': ' '.join(FOLLOWER_MODEL_ACTIONS[ac] for ac in path_actions[src_index]),
+            }
+        assert all(outputs)
+
+        # for i in range(batch_size):
+        #     assert outputs[i]['instr_id'] != '1008_0', "found example at index {}".format(i)
+
+        # Do a sequence rollout and calculate the loss
+        sequence_scores = try_cuda(torch.zeros(batch_size))
+        for t in range(self.instruction_len):
+            h_t,c_t,alpha,logit = self.decoder(w_t.view(-1, 1), h_t, c_t, ctx, path_mask)
+            # Supervised training
+
+            _,w_t = logit.max(1)        # student forcing - argmax
+            w_t = w_t.detach()
+
+            log_probs = F.log_softmax(logit, dim=1)
+            word_scores = -F.nll_loss(log_probs, w_t, ignore_index=vocab_pad_idx, reduce=False)
+            sequence_scores += word_scores.data
+
+            for perm_index, src_index in enumerate(perm_indices):
+                word_idx = w_t[perm_index].data[0]
+                if not ended[perm_index]:
+                    outputs[src_index]['word_indices'].append(word_idx)
+                    outputs[src_index]['score'] = sequence_scores[perm_index]
+                if word_idx == vocab_eos_idx:
+                    ended[perm_index] = True
+
+            # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
+
+            # Early exit if all ended
+            if ended.all():
+                break
+
+        for item in outputs:
+            item['words'] = self.env.tokenizer.decode_sentence(item['word_indices'], break_on_eos=True, join=False)
+        return outputs
+
 
     def test(self, use_dropout=False, feedback='argmax', allow_cheat=False, beam_size=1):
         ''' Evaluate once on each instruction in the current environment '''

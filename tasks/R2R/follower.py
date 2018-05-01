@@ -238,10 +238,14 @@ class Seq2SeqAgent(BaseAgent):
     def n_outputs():
         return len(FOLLOWER_MODEL_ACTIONS)-2 # Model doesn't output start or ignore
 
-    def _feature_variable(self, obs, beamed=False):
+    def _feature_variables(self, obs, beamed=False):
         ''' Extract precomputed features into variable. '''
-        feature_list = [ob['feature'] for ob in (flatten(obs) if beamed else obs)]
-        return self.env.image_features.batch_features(feature_list)
+        feature_lists = list(zip(*[ob['feature'] for ob in (flatten(obs) if beamed else obs)]))
+        assert len(feature_lists) == len(self.env.image_features_list)
+        batched = []
+        for featurizer, feature_list in zip(self.env.image_features_list, feature_lists):
+            batched.append(featurizer.batch_features(feature_list))
+        return batched
 
     def _teacher_action(self, obs, ended):
         ''' Extract teacher actions into variable. '''
@@ -303,8 +307,8 @@ class Seq2SeqAgent(BaseAgent):
 
             target = try_cuda(Variable(torch.LongTensor(next_target_list), requires_grad=False))
 
-            f_t = self._feature_variable(obs) # Image features from obs
-            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t, c_t, ctx, seq_mask)
+            f_t_list = self._feature_variables(obs) # Image features from obs
+            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t_list, h_t, c_t, ctx, seq_mask)
             # Mask outputs where agent can't move forward
             blocked_indices = []
             for i,ob in enumerate(obs):
@@ -386,8 +390,8 @@ class Seq2SeqAgent(BaseAgent):
         env_action = [None] * batch_size
         sequence_scores = try_cuda(torch.zeros(batch_size))
         for t in range(self.episode_len):
-            f_t = self._feature_variable(obs) # Image features from obs
-            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t, c_t, ctx, seq_mask)
+            f_t_list = self._feature_variables(obs) # Image features from obs
+            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t_list, h_t, c_t, ctx, seq_mask)
             # Mask outputs where agent can't move forward
             blocked_indices = []
             for i,ob in enumerate(obs):
@@ -498,9 +502,9 @@ class Seq2SeqAgent(BaseAgent):
             if len(a_t.shape) == 1:
                 a_t = a_t.unsqueeze(0)
             flat_obs = flatten(obs)
-            f_t = self._feature_variable(flat_obs) # Image features from obs
+            f_t_list = self._feature_variables(flat_obs) # Image features from obs
 
-            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t, h_t[flat_indices], c_t[flat_indices], ctx[beam_indices], seq_mask[beam_indices])
+            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t_list, h_t[flat_indices], c_t[flat_indices], ctx[beam_indices], seq_mask[beam_indices])
 
             # Mask outputs where agent can't move forward
             no_forward_mask = [len(ob['navigableLocations']) <= 1 for ob in flat_obs]

@@ -17,7 +17,7 @@ import utils
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,vocab_pad_idx,timeSince, try_cuda
 from env import R2RBatch, ImageFeatures
 import model
-from model import EncoderLSTM, AttnDecoderLSTM
+from model import EncoderLSTM, AttnDecoderLSTM, make_image_attention_layers
 from follower import Seq2SeqAgent
 import eval
 
@@ -44,14 +44,13 @@ log_every=100
 #log_every=20
 save_every=1000
 
-def get_model_prefix(args):
-    image_feature_name = ImageFeatures.get_name(args)
+def get_model_prefix(args, image_feature_list):
+    image_feature_name = "+".join([featurizer.get_name() for featurizer in image_feature_list])
     model_prefix = 'follower_{}_{}'.format(args.feedback_method, image_feature_name)
     if args.use_train_subset:
         model_prefix = 'trainsub_' + model_prefix
     if args.bidirectional:
         model_prefix = model_prefix + "_bidirectional"
-    model_prefix = model_prefix + "_" + args.image_feature_type
     return model_prefix
 
 def eval_model(agent, results_path, use_dropout, feedback, allow_cheat=False):
@@ -73,7 +72,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
 
     split_string = "-".join(train_env.splits)
     def make_path(iter):
-        return os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
+        return os.path.join(SNAPSHOT_DIR, '%s_%s_iter_%d' % (get_model_prefix(args, train_env.image_features_list), split_string, iter))
 
     best_metrics = {}
     last_model_saved = {}
@@ -102,7 +101,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
             val_loss_avg = np.average(val_losses)
             data_log['%s loss' % env_name].append(val_loss_avg)
 
-            agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), env_name, iter)
+            agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args, train_env.image_features_list), env_name, iter)
             # Get validation distance from goal under test evaluation conditions
             agent.test(use_dropout=False, feedback='argmax')
             if not args.no_save:
@@ -138,7 +137,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
 
             df = pd.DataFrame(data_log)
             df.set_index('iteration')
-            df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args))
+            df_path = '%s%s_log.csv' % (PLOT_DIR, get_model_prefix(args, train_env.image_features_list))
             df.to_csv(df_path)
 
 def setup():
@@ -152,42 +151,29 @@ def setup():
     if not os.path.exists(TRAINVAL_VOCAB):
         write_vocab(build_vocab(splits=['train','val_seen','val_unseen']), TRAINVAL_VOCAB)
 
-
-def make_image_attention_layer(args, image_features):
-    if args.image_feature_type != 'attention':
-        return None
-    image_attention_size = args.image_attention_size or hidden_size
-    if args.image_attention_type == 'feedforward':
-        return model.FeedforwardImageAttention(hidden_size, image_attention_size, image_feature_size=image_features.feature_dim)
-    elif args.image_attention_type == 'multiplicative':
-        return model.MultiplicativeImageAttention(hidden_size, image_attention_size, image_feature_size=image_features.feature_dim)
-    elif args.image_attention_type == 'bottom_up':
-        return model.BottomUpImageAttention(hidden_size, args.bottom_up_detection_embedding_size, args.bottom_up_detection_embedding_size, image_attention_size, image_features.num_objects, image_features.num_attributes, image_features.feature_dim)
-    else:
-        raise ValueError("invalid --image_attention_type {}".format(args.image_attention_type))
-
-
 def make_env_and_models(args, train_vocab_path, train_splits, test_splits, batch_size=BATCH_SIZE):
     setup()
-    image_features = ImageFeatures.from_args(args)
+    image_features_list = ImageFeatures.from_args(args)
     vocab = read_vocab(train_vocab_path)
     tok = Tokenizer(vocab=vocab)
-    train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
+    train_env = R2RBatch(image_features_list, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if args.bidirectional else hidden_size
     encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, vocab_pad_idx,
                                    dropout_ratio, bidirectional=args.bidirectional))
-    image_attention_layer = make_image_attention_layer(args, image_features)
-    if image_attention_layer:
-        feature_size = image_attention_layer.feature_size
-    else:
-        feature_size = image_features.feature_dim
+    image_attention_layers = make_image_attention_layers(args, image_features_list, hidden_size)
+    feature_size = 0
+    assert len(image_attention_layers) == len(image_features_list)
+    for layer, features in zip(image_attention_layers, image_features_list):
+        if layer:
+            feature_size += layer.feature_size
+        else:
+            feature_size += features.feature_dim
     decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
                                        action_embedding_size, hidden_size, dropout_ratio,
                                        feature_size=feature_size,
-                                       ablate_image_features=image_features.image_feature_type == "none",
-                                       image_attention_layer=image_attention_layer))
-    test_envs = {split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
+                                       image_attention_layers=image_attention_layers))
+    test_envs = {split: (R2RBatch(image_features_list, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
                 for split in test_splits}
     return train_env, test_envs, encoder, decoder
 
@@ -207,7 +193,7 @@ def train_setup(args, batch_size=BATCH_SIZE):
     return agent, train_env, val_envs
 
 def test_setup(args, batch_size=BATCH_SIZE):
-    train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'])
+    train_env, test_envs, encoder, decoder = make_env_and_models(args, TRAINVAL_VOCAB, ['train', 'val_seen', 'val_unseen'], ['test'], batch_size=batch_size)
     agent = Seq2SeqAgent(None, "", encoder, decoder, max_episode_len, max_instruction_length=MAX_INPUT_LENGTH)
     return agent, train_env, test_envs
 
@@ -224,7 +210,7 @@ def test_submission(args):
     test_env = test_envs['test']
     agent.env = test_env
 
-    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args), 'test', args.n_iters)
+    agent.results_path = '%s%s_%s_iter_%d.json' % (RESULT_DIR, get_model_prefix(args, train_env.image_features_list), 'test', args.n_iters)
     agent.test(use_dropout=False, feedback='argmax')
     if not args.no_save:
         agent.write_results()

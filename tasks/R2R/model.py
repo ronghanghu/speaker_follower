@@ -7,9 +7,35 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from utils import try_cuda
 
+from env import ConvolutionalImageFeatures, BottomUpImageFeatures
+
+
+def make_image_attention_layers(args, image_features_list, hidden_size):
+    image_attention_size = args.image_attention_size or hidden_size
+    attention_mechs = []
+    for featurizer in image_features_list:
+        if isinstance(featurizer, ConvolutionalImageFeatures):
+            if args.image_attention_type == 'feedforward':
+                attention_mechs.append(MultiplicativeImageAttention(hidden_size, image_attention_size, image_feature_size=featurizer.feature_dim))
+            elif args.image_attention_type == 'multiplicative':
+                attention_mechs.append(FeedforwardImageAttention(hidden_size, image_attention_size, image_feature_size=featurizer.feature_dim))
+        elif isinstance(featurizer, BottomUpImageFeatures):
+            attention_mechs.append(BottomUpImageAttention(
+                hidden_size,
+                args.bottom_up_detection_embedding_size,
+                args.bottom_up_detection_embedding_size,
+                image_attention_size,
+                featurizer.num_objects,
+                featurizer.num_attributes,
+                featurizer.feature_dim
+            ))
+        else:
+            attention_mechs.append(None)
+    attention_mechs = [try_cuda(mech) if mech else mech for mech in attention_mechs]
+    return attention_mechs
+
 
 # TODO: try variational dropout (or zoneout?)
-
 class EncoderLSTM(nn.Module):
     ''' Encodes navigation instructions, returning hidden state context (for
         attention methods) and a decoder initial state. '''
@@ -161,7 +187,7 @@ class BottomUpImageAttention(nn.Module):
         self.hidden_size = hidden_size
         self.num_objects = num_objects
         self.num_attributes = num_attributes
-        self.feature_size = image_feature_size + object_embedding_size + attribute_embedding_size + 1 + 4
+        self.feature_size = image_feature_size + object_embedding_size + attribute_embedding_size + 1 + 5
 
         self.object_embedding = nn.Embedding(num_objects, object_embedding_size)
         self.attribute_embedding = nn.Embedding(num_attributes, attribute_embedding_size)
@@ -179,7 +205,7 @@ class BottomUpImageAttention(nn.Module):
         # context: batch_size x context_size
         attribute_embedding = self.attribute_embedding(bottom_up_features.attribute_indices) # batch_size x max_num_detections x embedding_size
         object_embedding = self.object_embedding(bottom_up_features.object_indices) # batch_size x max_num_detections x embedding_size
-        feats = torch.cat((bottom_up_features.cls_prob.unsqueeze(2), bottom_up_features.image_features, attribute_embedding, object_embedding, bottom_up_features.boxes), dim=2) # batch_size x max_num_detections x (feat size)
+        feats = torch.cat((bottom_up_features.cls_prob.unsqueeze(2), bottom_up_features.image_features, attribute_embedding, object_embedding, bottom_up_features.spatial_features), dim=2) # batch_size x max_num_detections x (feat size)
 
         # attended_feats = feats.mean(dim=1)
         # attention = None
@@ -198,7 +224,7 @@ class AttnDecoderLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
 
     def __init__(self, input_action_size, output_action_size, embedding_size, hidden_size,
-                      dropout_ratio, feature_size=2048, ablate_image_features=False, image_attention_layer=None):
+                      dropout_ratio, feature_size=2048, image_attention_layers=None):
         super(AttnDecoderLSTM, self).__init__()
         self.embedding_size = embedding_size
         self.feature_size = feature_size
@@ -208,10 +234,9 @@ class AttnDecoderLSTM(nn.Module):
         self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
         self.attention_layer = SoftDotAttention(hidden_size)
         self.decoder2action = nn.Linear(hidden_size, output_action_size)
-        self.ablate_image_features = ablate_image_features
-        self.image_attention_layer = image_attention_layer
+        self.image_attention_layers = image_attention_layers
 
-    def forward(self, action, feature, h_0, c_0, ctx, ctx_mask=None):
+    def forward(self, action, feature_list, h_0, c_0, ctx, ctx_mask=None):
         ''' Takes a single step in the decoder LSTM (allowing sampling).
 
         action: batch x 1
@@ -223,20 +248,24 @@ class AttnDecoderLSTM(nn.Module):
         '''
         action_embeds = self.embedding(action)   # (batch, 1, embedding_size)
         action_embeds = action_embeds.squeeze(1)
-        if self.ablate_image_features:
-            feature = torch.zeros_like(feature)
-        if self.image_attention_layer:
-            feature, image_attention = self.image_attention_layer(feature, h_0)
-        else:
-            image_attention = None
 
-        concat_input = torch.cat((action_embeds, feature), 1) # (batch, embedding_size+feature_size)
+        inputs, attentions = [action_embeds], []
+        for feature, attention_layer in zip(feature_list, self.image_attention_layers):
+            if attention_layer:
+                attended_feature, attention = attention_layer(feature, h_0)
+            else:
+                attended_feature = feature
+                attention = None
+            inputs.append(attended_feature)
+            attentions.append(attention)
+
+        concat_input = torch.cat(inputs , 1) # (batch, embedding_size+feature_size)
         drop = self.drop(concat_input)
         h_1,c_1 = self.lstm(drop, (h_0,c_0))
         h_1_drop = self.drop(h_1)
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
         logit = self.decoder2action(h_tilde)
-        return h_1,c_1,alpha,image_attention,logit
+        return h_1,c_1,alpha,attentions,logit
 
 ## speaker models
 

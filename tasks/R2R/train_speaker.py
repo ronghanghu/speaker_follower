@@ -15,7 +15,7 @@ import argparse
 
 import utils
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,vocab_pad_idx,timeSince, try_cuda
-from env import R2RBatch, ImageFeatures, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX
+from env import R2RBatch, ImageFeatures, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, MeanPooledImageFeatures, NoImageFeatures
 import model
 from model import SpeakerEncoderLSTM, SpeakerDecoderLSTM
 from speaker import Seq2SeqSpeaker
@@ -46,12 +46,11 @@ log_every=100
 #log_every=20
 save_every=1000
 
-def get_model_prefix(args):
-    image_feature_name = ImageFeatures.get_name(args)
+def get_model_prefix(args, image_feature_list):
+    image_feature_name = "+".join([featurizer.get_name() for featurizer in image_feature_list])
     model_prefix = 'speaker_{}_{}'.format(feedback_method, image_feature_name)
     if args.use_train_subset:
         model_prefix = 'trainsub_' + model_prefix
-    model_prefix = model_prefix + "_" + args.image_feature_type
     return model_prefix
 
 def eval_model(agent, results_path, use_dropout, feedback, allow_cheat=False):
@@ -74,7 +73,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
     split_string = "-".join(train_env.splits)
 
     def make_path(iter):
-        return os.path.join(args.snapshot_dir, '%s_%s_iter_%d' % (get_model_prefix(args), split_string, iter))
+        return os.path.join(args.snapshot_dir, '%s_%s_iter_%d' % (get_model_prefix(args, train_env.image_features_list), split_string, iter))
 
     best_metrics = {}
     last_model_saved = {}
@@ -103,10 +102,11 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
             val_loss_avg = np.average(val_losses)
             data_log['%s loss' % env_name].append(val_loss_avg)
 
-            agent.results_path = '%s%s_%s_iter_%d.json' % (args.result_dir, get_model_prefix(args), env_name, iter)
+            agent.results_path = '%s%s_%s_iter_%d.json' % (args.result_dir, get_model_prefix(args, train_env.image_features_list), env_name, iter)
             # Get validation distance from goal under test evaluation conditions
             results = agent.test(use_dropout=False, feedback='argmax')
-            agent.write_results()
+            if not args.no_save:
+                agent.write_results()
             print("evaluating on {}".format(env_name))
             score_summary = evaluator.score_results(results, verbose=True)
             print()
@@ -120,26 +120,28 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
                     key = (env_name, metric)
                     if key not in best_metrics or best_metrics[key] < val:
                         best_metrics[key] = val
-                        model_path = make_path(iter) + "_%s-%s=%.3f" % (env_name, metric, val)
-                        save_log.append("new best, saved model to %s" % model_path)
-                        agent.save(model_path)
-                        if key in last_model_saved:
-                            for old_model_path in agent._encoder_and_decoder_paths(last_model_saved[key]):
-                                os.remove(old_model_path)
-                        last_model_saved[key] = model_path
+                        if not args.no_save:
+                            model_path = make_path(iter) + "_%s-%s=%.3f" % (env_name, metric, val)
+                            save_log.append("new best, saved model to %s" % model_path)
+                            agent.save(model_path)
+                            if key in last_model_saved:
+                                for old_model_path in agent._encoder_and_decoder_paths(last_model_saved[key]):
+                                    os.remove(old_model_path)
+                            last_model_saved[key] = model_path
 
         print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/args.n_iters),
                                              iter, float(iter)/args.n_iters*100, loss_str)))
         for s in save_log:
             print(s)
 
-        if save_every and iter % save_every == 0:
-            agent.save(make_path(iter))
+        if not args.no_save:
+            if save_every and iter % save_every == 0:
+                agent.save(make_path(iter))
 
-        df = pd.DataFrame(data_log)
-        df.set_index('iteration')
-        df_path = '%s%s_log.csv' % (args.plot_dir, get_model_prefix(args))
-        df.to_csv(df_path)
+            df = pd.DataFrame(data_log)
+            df.set_index('iteration')
+            df_path = '%s%s_log.csv' % (args.plot_dir, get_model_prefix(args, train_env.image_features_list))
+            df.to_csv(df_path)
 
 def setup():
     torch.manual_seed(1)
@@ -152,18 +154,22 @@ def setup():
 
 def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     setup()
-    image_features = ImageFeatures.from_args(args)
+    image_features_list = ImageFeatures.from_args(args)
+    assert len(image_features_list) == 1
+    image_features = image_features_list[0]
+    assert isinstance(image_features, MeanPooledImageFeatures) or isinstance(image_features, NoImageFeatures)
     vocab = read_vocab(train_vocab_path)
     tok = Tokenizer(vocab=vocab)
-    train_env = R2RBatch(image_features, batch_size=batch_size, splits=train_splits, tokenizer=tok)
+    train_env = R2RBatch(image_features_list, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
     encoder = try_cuda(SpeakerEncoderLSTM(len(FOLLOWER_ENV_ACTIONS), action_embedding_size, image_features.feature_dim,
                                           enc_hidden_size, IGNORE_ACTION_INDEX, dropout_ratio, bidirectional=bidirectional))
+
     decoder = try_cuda(SpeakerDecoderLSTM(len(vocab), word_embedding_size, hidden_size, dropout_ratio))
 
     test_envs = {
-        split: (R2RBatch(image_features, batch_size=batch_size, splits=[split], tokenizer=tok), eval_speaker.SpeakerEvaluation([split]))
+        split: (R2RBatch(image_features_list, batch_size=batch_size, splits=[split], tokenizer=tok), eval_speaker.SpeakerEvaluation([split]))
         for split in test_splits
     }
     return train_env, test_envs, encoder, decoder
@@ -200,9 +206,10 @@ def test_submission(args):
     test_env = test_envs['test']
     agent.env = test_env
 
-    agent.results_path = '%s%s_%s_iter_%d.json' % (args.result_dir, get_model_prefix(args), 'test', 20000)
+    agent.results_path = '%s%s_%s_iter_%d.json' % (args.result_dir, get_model_prefix(args, train_env.image_features_list), 'test', 20000)
     agent.test(use_dropout=False, feedback='argmax')
-    agent.write_results()
+    if not args.no_save:
+        agent.write_results()
 
 def make_arg_parser():
     parser = argparse.ArgumentParser()
@@ -210,6 +217,8 @@ def make_arg_parser():
 
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
     parser.add_argument("--n_iters", type=int, default=20000)
+    parser.add_argument("--no_save", action='store_true')
+
     parser.add_argument("--result_dir", default=RESULT_DIR)
     parser.add_argument("--snapshot_dir", default=SNAPSHOT_DIR)
     parser.add_argument("--plot_dir", default=PLOT_DIR)
