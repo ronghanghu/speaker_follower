@@ -14,6 +14,8 @@ import os.path
 import time
 import paths
 import pickle
+import os
+import os.path
 
 from collections import namedtuple, defaultdict
 
@@ -123,7 +125,8 @@ class ImageFeatures(object):
             elif image_feature_type == "bottom_up_attention":
                 feats.append(BottomUpImageFeatures(
                     args.bottom_up_detections,
-                    precomputed_cache_path=paths.bottom_up_feature_cache_path
+                    #precomputed_cache_path=paths.bottom_up_feature_cache_path,
+                    precomputed_cache_dir=paths.bottom_up_feature_cache_dir,
                 ))
             elif image_feature_type == "convolutional_attention":
                 feats.append(ConvolutionalImageFeatures(
@@ -252,7 +255,7 @@ class BottomUpImageFeatures(ImageFeatures):
     PAD_ITEM = ("<pad>",)
     feature_dim = ImageFeatures.MEAN_POOLED_DIM
 
-    def __init__(self, number_of_detections, precomputed_cache_path=None, image_width=640, image_height=480):
+    def __init__(self, number_of_detections, precomputed_cache_path=None, precomputed_cache_dir=None, image_width=640, image_height=480):
         self.number_of_detections = number_of_detections
         self.index_to_attributes, self.attribute_to_index = BottomUpImageFeatures.read_visual_genome_vocab(paths.bottom_up_attribute_path, BottomUpImageFeatures.PAD_ITEM, add_null=True)
         self.index_to_objects, self.object_to_index = BottomUpImageFeatures.read_visual_genome_vocab(paths.bottom_up_object_path, BottomUpImageFeatures.PAD_ITEM, add_null=False)
@@ -266,26 +269,39 @@ class BottomUpImageFeatures(ImageFeatures):
         self.image_width = image_width
         self.image_height = image_height
 
-        if precomputed_cache_path:
+        self.precomputed_cache = {}
+        def add_to_cache(key, viewpoints):
+            assert len(viewpoints) == ImageFeatures.NUM_VIEWS
+            viewpoint_feats = []
+            for viewpoint in viewpoints:
+                params = {}
+                for param_key, param_value in viewpoint.items():
+                    if param_key == 'boxes':
+                        # TODO: this is for backward compatibility, remove it
+                        param_key = 'spatial_features'
+                        param_value = spatial_feature_from_bbox(param_value, self.image_height, self.image_width)
+                    assert len(param_value) >= self.number_of_detections
+                    params[param_key] = param_value[:self.number_of_detections]
+                viewpoint_feats.append(BottomUpViewpoint(**params))
+            self.precomputed_cache[key] = viewpoint_feats
+
+        if precomputed_cache_dir:
+            self.precomputed_cache = {}
+            import glob
+            for scene_dir in glob.glob(os.path.join(precomputed_cache_dir, "*")):
+                scene_id = os.path.basename(scene_dir)
+                pickle_file = os.path.join(scene_dir, "d={}.pkl".format(number_of_detections))
+                with open(pickle_file, 'rb') as f:
+                    data = pickle.load(f)
+                    for (viewpoint_id, viewpoints) in data.items():
+                        key = (scene_id, viewpoint_id)
+                        add_to_cache(key, viewpoints)
+        elif precomputed_cache_path:
             self.precomputed_cache = {}
             with open(precomputed_cache_path, 'rb') as f:
                 data = pickle.load(f)
                 for (key, viewpoints) in data.items():
-                    assert len(viewpoints) == ImageFeatures.NUM_VIEWS
-                    viewpoint_feats = []
-                    for viewpoint in viewpoints:
-                        params = {}
-                        for param_key, param_value in viewpoint.items():
-                            if param_key == 'boxes':
-                                # TODO: this is for backward compatibility, remove it
-                                param_key = 'spatial_features'
-                                param_value = spatial_feature_from_bbox(param_value, self.image_height, self.image_width)
-                            assert len(param_value) >= self.number_of_detections
-                            params[param_key] = param_value[:self.number_of_detections]
-                        viewpoint_feats.append(BottomUpViewpoint(**params))
-                    self.precomputed_cache[key] = viewpoint_feats
-        else:
-            self.precomputed_cache = None
+                    add_to_cache(key, viewpoints)
 
     @staticmethod
     def read_visual_genome_vocab(fname, pad_name, add_null=False):
@@ -344,7 +360,7 @@ class BottomUpImageFeatures(ImageFeatures):
 
     @functools.lru_cache(maxsize=20000)
     def _get_viewpoint_features(self, scan_id, viewpoint_id):
-        if self.precomputed_cache is not None:
+        if self.precomputed_cache:
             return self.precomputed_cache[(scan_id, viewpoint_id)]
 
         fname = os.path.join(paths.bottom_up_feature_store_path, scan_id, "{}.p".format(viewpoint_id))

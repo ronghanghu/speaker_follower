@@ -215,7 +215,7 @@ class BottomUpImageAttention(nn.Module):
         x = x_context + x_feature # batch_size x max_num_detections x hidden_size
         x = F.relu(x)
         x = self.fc2(x).squeeze(-1) # batch_size x max_num_detections
-        x.data.masked_fill_(bottom_up_features.no_object_mask, -float("-inf"))
+        x.data.masked_fill_(bottom_up_features.no_object_mask, -float("inf"))
         attention = F.softmax(x, 1).unsqueeze(1) # batch_size x 1 x max_num_detections
         attended_feats = torch.bmm(attention, feats).squeeze(1) # batch_size x feat_size
         return attended_feats, attention
