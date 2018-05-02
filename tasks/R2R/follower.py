@@ -621,7 +621,7 @@ class Seq2SeqAgent(BaseAgent):
 
         trajs = []
 
-        for beam_index, this_completed in enumerate(completed):
+        for this_completed in completed:
             assert this_completed
             this_trajs = []
             for inf_state in sorted(this_completed, key=lambda t: t.score, reverse=True)[:beam_size]:

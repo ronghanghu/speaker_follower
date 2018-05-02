@@ -2,6 +2,7 @@ import json
 import sys
 import numpy as np
 import random
+from collections import namedtuple
 
 import torch
 import torch.nn as nn
@@ -10,10 +11,24 @@ import torch.nn.functional as F
 import torch.distributions as D
 
 from utils import vocab_pad_idx, vocab_bos_idx, vocab_eos_idx, flatten, try_cuda
-
 from env import IGNORE_ACTION_INDEX, index_action_tuple, FOLLOWER_MODEL_ACTIONS
-
 from follower import batch_instructions_from_encoded
+
+InferenceState = namedtuple("InferenceState", "prev_inference_state, flat_index, last_word, word_count, score")
+
+def backchain_inference_states(last_inference_state):
+    word_indices = []
+    inf_state = last_inference_state
+    scores = []
+    last_score = None
+    while inf_state is not None:
+        word_indices.append(inf_state.last_word)
+        if last_score is not None:
+            scores.append(last_score - inf_state.score)
+        last_score = inf_state.score
+        inf_state = inf_state.prev_inference_state
+    scores.append(last_score)
+    return list(reversed(word_indices))[1:], list(reversed(scores))[1:] # exclude BOS
 
 class Seq2SeqSpeaker(object):
     feedback_options = ['teacher', 'argmax', 'sample']
@@ -184,59 +199,103 @@ class Seq2SeqSpeaker(object):
         assert len(path_obs) == len(path_actions)
 
         start_obs, batched_image_features, batched_actions, path_mask, path_lengths, _, perm_indices = self._batch_observations_and_actions(path_obs, path_actions, None)
-
         batch_size = len(start_obs)
+        assert len(perm_indices) == batch_size
 
         ctx,h_t,c_t = self.encoder(batched_actions, batched_image_features, path_lengths)
 
-        w_t = try_cuda(Variable(torch.from_numpy(np.full((batch_size,), vocab_bos_idx, dtype='int64')).long(),
-                                requires_grad=False))
-        ended = np.array([False] * batch_size)
+        completed = []
+        for _ in range(batch_size):
+            completed.append([])
 
-        assert len(perm_indices) == batch_size
-        outputs = [None] * batch_size
-        for perm_index, src_index in enumerate(perm_indices):
-            outputs[src_index] = {
-                'instr_id': start_obs[perm_index]['instr_id'],
-                'word_indices': [],
-                #'actions': ' '.join(FOLLOWER_MODEL_ACTIONS[ac] for ac in path_actions[src_index]),
-            }
-        assert all(outputs)
+        beams = [
+            [InferenceState(prev_inference_state=None,
+                            flat_index=i,
+                            last_word=vocab_bos_idx,
+                            word_count=0,
+                            score=0.0)]
+            for i in range(batch_size)
+        ]
 
-        # for i in range(batch_size):
-        #     assert outputs[i]['instr_id'] != '1008_0', "found example at index {}".format(i)
-
-        # Do a sequence rollout and calculate the loss
-        sequence_scores = try_cuda(torch.zeros(batch_size))
         for t in range(self.instruction_len):
-            h_t,c_t,alpha,logit = self.decoder(w_t.view(-1, 1), h_t, c_t, ctx, path_mask)
-            # Supervised training
+            flat_indices = []
+            beam_indices = []
+            w_t_list = []
+            for beam_index, beam in enumerate(beams):
+                for inf_state in beam:
+                    beam_indices.append(beam_index)
+                    flat_indices.append(inf_state.flat_index)
+                    w_t_list.append(inf_state.last_word)
+            w_t = try_cuda(Variable(torch.LongTensor(w_t_list), requires_grad=False))
+            if len(w_t.shape) == 1:
+                w_t = w_t.unsqueeze(0)
 
-            _,w_t = logit.max(1)        # student forcing - argmax
-            w_t = w_t.detach()
+            h_t,c_t,alpha,logit = self.decoder(w_t.view(-1, 1), h_t[flat_indices], c_t[flat_indices], ctx[beam_indices], path_mask[beam_indices])
 
-            log_probs = F.log_softmax(logit, dim=1)
-            word_scores = -F.nll_loss(log_probs, w_t, ignore_index=vocab_pad_idx, reduce=False)
-            sequence_scores += word_scores.data
+            log_probs = F.log_softmax(logit, dim=1).data
+            _, word_indices = logit.data.topk(min(beam_size, logit.size()[1]), dim=1)
+            word_scores = log_probs.gather(1, word_indices)
+            assert word_scores.size() == word_indices.size()
 
-            for perm_index, src_index in enumerate(perm_indices):
-                word_idx = w_t[perm_index].data[0]
-                if not ended[perm_index]:
-                    outputs[src_index]['word_indices'].append(word_idx)
-                    outputs[src_index]['score'] = sequence_scores[perm_index]
-                if word_idx == vocab_eos_idx:
-                    ended[perm_index] = True
+            start_index = 0
+            new_beams = []
+            all_successors = []
+            for beam_index, beam in enumerate(beams):
+                successors = []
+                end_index = start_index + len(beam)
+                if beam:
+                    for inf_index, (inf_state, word_score_row, word_index_row) in \
+                        enumerate(zip(beam, word_scores[start_index:end_index], word_indices[start_index:end_index])):
+                        for word_score, word_index in zip(word_score_row, word_index_row):
+                            flat_index = start_index + inf_index
+                            successors.append(
+                                InferenceState(
+                                    prev_inference_state=inf_state,
+                                    flat_index=flat_index,
+                                    last_word=word_index,
+                                    word_count=inf_state.word_count + 1,
+                                    score=inf_state.score + word_score)
+                            )
+                start_index = end_index
+                successors = sorted(successors, key=lambda t: t.score, reverse=True)[:beam_size]
+                all_successors.append(successors)
 
-            # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
+            for beam_index, successors in enumerate(all_successors):
+                new_beam = []
+                for successor in successors:
+                    if successor.last_word == vocab_eos_idx or t == self.instruction_len - 1:
+                        completed[beam_index].append(successor)
+                    else:
+                        new_beam.append(successor)
+                if len(completed[beam_index]) >= beam_size:
+                    new_beam = []
+                new_beams.append(new_beam)
 
-            # Early exit if all ended
-            if ended.all():
+            beams = new_beams
+
+            if not any(beam for beam in beams):
                 break
 
-        for item in outputs:
-            item['words'] = self.env.tokenizer.decode_sentence(item['word_indices'], break_on_eos=True, join=False)
-        return outputs
+        outputs = []
+        for _ in range(batch_size):
+            outputs.append([])
 
+        for perm_index, src_index in enumerate(perm_indices):
+            this_outputs = outputs[src_index]
+            assert len(this_outputs) == 0
+
+            this_completed = completed[perm_index]
+            instr_id = start_obs[perm_index]['instr_id']
+            for inf_state in sorted(this_completed, key=lambda t: t.score, reverse=True)[:beam_size]:
+                word_indices, scores = backchain_inference_states(inf_state)
+                this_outputs.append({
+                    'instr_id': instr_id,
+                    'word_indices': word_indices,
+                    'score': inf_state.score,
+                    'scores': scores,
+                    'words': self.env.tokenizer.decode_sentence(word_indices, break_on_eos=True, join=False)
+                })
+        return outputs
 
     def test(self, use_dropout=False, feedback='argmax', allow_cheat=False, beam_size=1):
         ''' Evaluate once on each instruction in the current environment '''
@@ -254,10 +313,34 @@ class Seq2SeqSpeaker(object):
         self.losses = []
         self.results = {}
 
+
         # We rely on env showing the entire batch before repeating anything
         looped = False
+        rollout_scores = []
+        beam_10_scores = []
         while True:
             rollout_results = self.rollout()
+            # if self.feedback == 'argmax':
+            #     path_obs, path_actions, _ = self.env.gold_obs_actions_and_instructions(self.max_episode_len, load_next_minibatch=False)
+            #     beam_results = self.beam_search(1, path_obs, path_actions)
+            #     assert len(rollout_results) == len(beam_results)
+            #     for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
+            #         assert rollout_traj['instr_id'] == beam_trajs[0]['instr_id']
+            #         assert rollout_traj['word_indices'] == beam_trajs[0]['word_indices']
+            #         assert np.allclose(rollout_traj['score'], beam_trajs[0]['score'])
+            #     print("passed check: beam_search with beam_size=1")
+            #
+            #     self.env.set_beam_size(10)
+            #     beam_results = self.beam_search(10, path_obs, path_actions)
+            #     assert len(rollout_results) == len(beam_results)
+            #     for rollout_traj, beam_trajs in zip(rollout_results, beam_results):
+            #         rollout_score = rollout_traj['score']
+            #         rollout_scores.append(rollout_score)
+            #         beam_score = beam_trajs[0]['score']
+            #         beam_10_scores.append(beam_score)
+            #         # assert rollout_score <= beam_score
+            # # print("passed check: beam_search with beam_size=10")
+
             for result in rollout_results:
                 if result['instr_id'] in self.results:
                     looped = True
@@ -265,6 +348,9 @@ class Seq2SeqSpeaker(object):
                     self.results[result['instr_id']] = result
             if looped:
                 break
+        # if self.feedback == 'argmax':
+        #     print("avg rollout score: ", np.mean(rollout_scores))
+        #     print("avg beam 10 score: ", np.mean(beam_10_scores))
         return self.results
 
     def train(self, encoder_optimizer, decoder_optimizer, n_iters, feedback='teacher'):

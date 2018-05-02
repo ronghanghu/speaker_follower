@@ -276,6 +276,9 @@ class BottomUpImageFeatures(ImageFeatures):
             for viewpoint in viewpoints:
                 params = {}
                 for param_key, param_value in viewpoint.items():
+                    if param_key == 'cls_prob':
+                        # make sure it's in descending order
+                        assert np.all(param_value[:-1] >= param_value[1:])
                     if param_key == 'boxes':
                         # TODO: this is for backward compatibility, remove it
                         param_key = 'spatial_features'
