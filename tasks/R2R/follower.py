@@ -44,7 +44,8 @@ def batch_instructions_from_encoded(encoded_instructions, max_length, reverse=Fa
     seq_tensor = np.full((num_instructions, max_length), vocab_pad_idx)
     seq_lengths = []
     for i, inst in enumerate(encoded_instructions):
-        assert inst[-1] != vocab_eos_idx
+        if len(inst) > 0:
+            assert inst[-1] != vocab_eos_idx
         if reverse:
             inst = inst[::-1]
         inst = np.concatenate((inst, [vocab_eos_idx]))
@@ -129,6 +130,7 @@ class BaseAgent(object):
             #                 for o1, o2 in zip(rollout_results[i]['observations'], path_obs[i])]
             #     action_scores = self._score_obs_actions_and_instructions(path_obs, path_actions, encoded_instructions)
             #     assert np.allclose(rollout_loss.data[0], self.loss.data[0])
+                #assert np.allclose(np.sum(np.sum(action_scores)),
 
             for result in rollout_results:
                 if result['instr_id'] in self.results:

@@ -24,7 +24,7 @@ def validate_entry_point(args):
 
         ## predicted
         pred_results = agent.test(use_dropout=False, feedback='argmax')
-        pred_score_summary = evaluator.score_results(pred_results, verbose=False)
+        pred_score_summary, _ = evaluator.score_results(pred_results, verbose=False)
 
         for metric,val in pred_score_summary.items():
             print("pred {} {}\t{}".format(env_name, metric, val))

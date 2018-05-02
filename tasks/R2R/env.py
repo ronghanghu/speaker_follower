@@ -16,6 +16,7 @@ import paths
 import pickle
 import os
 import os.path
+import sys
 
 from collections import namedtuple, defaultdict
 
@@ -482,13 +483,16 @@ class EnvBatch():
 class R2RBatch():
     ''' Implements the Room to Room navigation task, using discretized viewpoints and pretrained features '''
 
-    def __init__(self, image_features_list, batch_size=100, seed=10, splits=['train'], tokenizer=None, beam_size=1):
+    def __init__(self, image_features_list, batch_size=100, seed=10, splits=['train'], tokenizer=None, beam_size=1, instruction_limit=None):
         self.image_features_list = image_features_list
         self.data = []
         self.scans = []
         for item in load_datasets(splits):
             # Split multiple instructions into separate entries
-            for j,instr in enumerate(item['instructions']):
+            instructions = item['instructions']
+            if instruction_limit:
+                instructions = instructions[:instruction_limit]
+            for j,instr in enumerate(instructions):
                 self.scans.append(item['scan'])
                 new_item = dict(item)
                 new_item['instr_id'] = '%s_%d' % (item['path_id'], j)
@@ -508,6 +512,7 @@ class R2RBatch():
         self.batch_size = batch_size
         self._load_nav_graphs()
         self.set_beam_size(beam_size)
+        self.print_progress = False
         print('R2RBatch loaded with %d instructions, using splits: %s' % (len(self.data), ",".join(splits)))
 
     def set_beam_size(self, beam_size):
@@ -533,6 +538,8 @@ class R2RBatch():
 
     def _next_minibatch(self, sort_instr_length):
         batch = self.data[self.ix:self.ix+self.batch_size]
+        if self.print_progress:
+            sys.stderr.write("\rix {} / {}".format(self.ix, len(self.data)))
         if len(batch) < self.batch_size:
             random.shuffle(self.data)
             self.ix = self.batch_size - len(batch)

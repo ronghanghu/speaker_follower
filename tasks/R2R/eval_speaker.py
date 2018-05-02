@@ -66,20 +66,26 @@ class SpeakerEvaluation(object):
 
         model_scores = []
 
+        instruction_replaced_gt = []
+
         skip_count = 0
         skipped_refs = set()
         for base_id, result in sorted(results_by_base_id.items()):
             instr_count += 1
             gt = self.gt[base_id]
             tokenized_refs = [Tokenizer.split_sentence(ref) for ref in gt['instructions']]
+            tokenized_hyp = result['words']
+
+            replaced_gt = gt.copy()
+            replaced_gt['instructions'] = [' '.join(tokenized_hyp)]
+            instruction_replaced_gt.append(replaced_gt)
+
             if len(tokenized_refs) != 3:
                 skip_count += 1
                 skipped_refs.add(base_id)
                 continue
-            tokenized_hyp = result['words']
             all_refs.append(tokenized_refs)
             all_hyps.append(tokenized_hyp)
-
             if 'score' in result:
                 model_scores.append(result['score'])
 
@@ -100,7 +106,7 @@ class SpeakerEvaluation(object):
             'bleu': bleu,
             'unpenalized_bleu': unpenalized_bleu,
         }
-        return score_summary
+        return score_summary, instruction_replaced_gt
 
     def score_file(self, output_file, verbose=False):
         ''' Evaluate each agent trajectory based on how close it got to the goal location '''

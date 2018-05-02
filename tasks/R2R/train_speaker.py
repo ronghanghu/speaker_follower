@@ -108,7 +108,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
             if not args.no_save:
                 agent.write_results()
             print("evaluating on {}".format(env_name))
-            score_summary = evaluator.score_results(results, verbose=True)
+            score_summary, _ = evaluator.score_results(results, verbose=True)
             print()
 
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
@@ -152,7 +152,7 @@ def setup():
     if not os.path.exists(TRAINVAL_VOCAB):
         write_vocab(build_vocab(splits=['train','val_seen','val_unseen']), TRAINVAL_VOCAB)
 
-def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
+def make_env_and_models(args, train_vocab_path, train_splits, test_splits, test_instruction_limit=None):
     setup()
     image_features_list = ImageFeatures.from_args(args)
     assert len(image_features_list) == 1
@@ -169,7 +169,7 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits):
     decoder = try_cuda(SpeakerDecoderLSTM(len(vocab), word_embedding_size, hidden_size, dropout_ratio))
 
     test_envs = {
-        split: (R2RBatch(image_features_list, batch_size=batch_size, splits=[split], tokenizer=tok), eval_speaker.SpeakerEvaluation([split]))
+        split: (R2RBatch(image_features_list, batch_size=batch_size, splits=[split], tokenizer=tok, instruction_limit=test_instruction_limit), eval_speaker.SpeakerEvaluation([split]))
         for split in test_splits
     }
     return train_env, test_envs, encoder, decoder
