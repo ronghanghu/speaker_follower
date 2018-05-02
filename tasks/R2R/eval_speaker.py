@@ -12,16 +12,20 @@ from bleu import multi_bleu
 class SpeakerEvaluation(object):
     ''' Results submission format:  [{'instr_id': string, 'trajectory':[(viewpoint_id, heading_rads, elevation_rads),] } ] '''
 
-    def __init__(self, splits):
+    def __init__(self, splits, instructions_per_path=None):
         self.splits = splits
         self.gt = {}
         self.instr_ids = []
         self.scans = []
+        if instructions_per_path is None:
+            instructions_per_path = 3
+        self.instructions_per_path = instructions_per_path
 
         for item in load_datasets(splits):
+            item['instructions'] = item['instructions'][:instructions_per_path]
             self.gt[item['path_id']] = item
             self.scans.append(item['scan'])
-            self.instr_ids += ['%d_%d' % (item['path_id'],i) for i in range(3)]
+            self.instr_ids += ['%d_%d' % (item['path_id'],i) for i in range(len(item['instructions']))]
 
         self.scans = set(self.scans)
         self.instr_ids = set(self.instr_ids)
@@ -80,14 +84,15 @@ class SpeakerEvaluation(object):
             replaced_gt['instructions'] = [' '.join(tokenized_hyp)]
             instruction_replaced_gt.append(replaced_gt)
 
-            if len(tokenized_refs) != 3:
+            if 'score' in result:
+                model_scores.append(result['score'])
+
+            if len(tokenized_refs) != self.instructions_per_path:
                 skip_count += 1
                 skipped_refs.add(base_id)
                 continue
             all_refs.append(tokenized_refs)
             all_hyps.append(tokenized_hyp)
-            if 'score' in result:
-                model_scores.append(result['score'])
 
             if verbose and instr_count % 100 == 0:
                 for i, ref in enumerate(tokenized_refs):
@@ -96,7 +101,7 @@ class SpeakerEvaluation(object):
                 print()
 
         if skip_count != 0:
-            print("skipped {} instructions without 3 refs: {}".format(skip_count, ' '.join(str(i) for i in skipped_refs)))
+            print("skipped {} instructions without {} refs: {}".format(skip_count, self.instructions_per_path, ' '.join(str(i) for i in skipped_refs)))
 
         model_score = np.mean(model_scores)
         bleu, unpenalized_bleu = multi_bleu(all_refs, all_hyps)

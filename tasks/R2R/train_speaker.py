@@ -169,7 +169,7 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits, test_
     decoder = try_cuda(SpeakerDecoderLSTM(len(vocab), word_embedding_size, hidden_size, dropout_ratio))
 
     test_envs = {
-        split: (R2RBatch(image_features_list, batch_size=batch_size, splits=[split], tokenizer=tok, instruction_limit=test_instruction_limit), eval_speaker.SpeakerEvaluation([split]))
+        split: (R2RBatch(image_features_list, batch_size=batch_size, splits=[split], tokenizer=tok, instruction_limit=test_instruction_limit), eval_speaker.SpeakerEvaluation([split], instructions_per_path=test_instruction_limit))
         for split in test_splits
     }
     return train_env, test_envs, encoder, decoder

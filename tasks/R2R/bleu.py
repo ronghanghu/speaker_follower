@@ -20,7 +20,10 @@ def call_bleu(base_ref_fname, hyp_fname):
         # print(match.group(0))
         bleu = float(match.group(1))
         brevity_penalty = float(match.group(2))
-        return bleu, bleu / brevity_penalty
+        unpenalized = 0
+        if brevity_penalty != 0:
+            unpenalized = bleu / brevity_penalty
+        return bleu, unpenalized
 
     else:
         sys.stderr.write("warning: BLEU score not found in output file, returning 0")
