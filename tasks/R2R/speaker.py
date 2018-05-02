@@ -133,6 +133,7 @@ class Seq2SeqSpeaker(object):
             outputs[src_index] = {
                 'instr_id': start_obs[perm_index]['instr_id'],
                 'word_indices': [],
+                'scores': [],
                 #'actions': ' '.join(FOLLOWER_MODEL_ACTIONS[ac] for ac in path_actions[src_index]),
             }
         assert all(outputs)
@@ -174,6 +175,7 @@ class Seq2SeqSpeaker(object):
                 if not ended[perm_index]:
                     outputs[src_index]['word_indices'].append(word_idx)
                     outputs[src_index]['score'] = sequence_scores[perm_index]
+                    outputs[src_index]['scores'].append(word_scores[perm_index].data)
                 if word_idx == vocab_eos_idx:
                     ended[perm_index] = True
 
@@ -383,8 +385,8 @@ class Seq2SeqSpeaker(object):
         torch.save(self.encoder.state_dict(), encoder_path)
         torch.save(self.decoder.state_dict(), decoder_path)
 
-    def load(self, path):
+    def load(self, path, **kwargs):
         ''' Loads parameters (but not training state) '''
         encoder_path, decoder_path = self._encoder_and_decoder_paths(path)
-        self.encoder.load_state_dict(torch.load(encoder_path))
-        self.decoder.load_state_dict(torch.load(decoder_path))
+        self.encoder.load_state_dict(torch.load(encoder_path, **kwargs))
+        self.decoder.load_state_dict(torch.load(decoder_path, **kwargs))

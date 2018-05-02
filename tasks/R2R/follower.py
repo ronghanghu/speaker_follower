@@ -36,7 +36,7 @@ def backchain_inference_states(last_inference_state):
     scores.append(last_score)
     return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:], list(reversed(scores))[1:] # exclude start action
 
-def batch_instructions_from_encoded(encoded_instructions, max_length, reverse=False):
+def batch_instructions_from_encoded(encoded_instructions, max_length, reverse=False, sort=False):
     # encoded_instructions: list of lists of token indices (should not be padded, or contain BOS or EOS tokens)
     #seq_tensor = np.array(encoded_instructions)
     # make sure pad does not start any sentence
@@ -54,12 +54,19 @@ def batch_instructions_from_encoded(encoded_instructions, max_length, reverse=Fa
         seq_lengths.append(len(inst))
 
     seq_tensor = torch.from_numpy(seq_tensor)
+    if sort:
+        seq_lengths, perm_idx = torch.from_numpy(np.array(seq_lengths)).sort(0, True)
+        seq_lengths = list(seq_lengths)
+        seq_tensor = seq_tensor[perm_idx]
 
     mask = (seq_tensor == vocab_pad_idx)[:, :max(seq_lengths)]
 
-    return try_cuda(Variable(seq_tensor, requires_grad=False).long()), \
-           try_cuda(mask.byte()), \
-           seq_lengths
+    ret_tp = try_cuda(Variable(seq_tensor, requires_grad=False).long()), \
+             try_cuda(mask.byte()), \
+             seq_lengths
+    if sort:
+        ret_tp = ret_tp + (list(perm_idx),)
+    return ret_tp
 
 class BaseAgent(object):
     ''' Base class for an R2R agent to generate and save trajectories. '''
@@ -128,9 +135,13 @@ class BaseAgent(object):
             #         assert rollout_results[i]['actions'] == path_actions[i]
             #         assert [o1['viewpoint'] == o2['viewpoint']
             #                 for o1, o2 in zip(rollout_results[i]['observations'], path_obs[i])]
-            #     action_scores = self._score_obs_actions_and_instructions(path_obs, path_actions, encoded_instructions)
-            #     assert np.allclose(rollout_loss.data[0], self.loss.data[0])
-                #assert np.allclose(np.sum(np.sum(action_scores)),
+            #     trajs, loss = self._score_obs_actions_and_instructions(path_obs, path_actions, encoded_instructions)
+            #     for traj, rollout in zip(trajs, rollout_results):
+            #         assert traj['instr_id'] == rollout['instr_id']
+            #         assert traj['actions'] == rollout['actions']
+            #         assert np.allclose(traj['score'], rollout['score'])
+            #     assert np.allclose(rollout_loss.data[0], loss.data[0])
+            #     print('passed score test')
 
             for result in rollout_results:
                 if result['instr_id'] in self.results:
@@ -280,8 +291,8 @@ class Seq2SeqAgent(BaseAgent):
         for path_o, path_a in zip(path_obs, path_actions):
             assert len(path_o) == len(path_a) + 1
 
-        seq, seq_mask, seq_lengths = batch_instructions_from_encoded(encoded_instructions, self.max_instruction_length, reverse=self.reverse_instruction)
-        self.loss = 0
+        seq, seq_mask, seq_lengths, perm_indices = batch_instructions_from_encoded(encoded_instructions, self.max_instruction_length, reverse=self.reverse_instruction, sort=True)
+        loss = 0
 
         ctx, h_t, c_t = self.encoder(seq, seq_lengths)
         a_t = try_cuda(Variable(torch.ones(batch_size).long() * START_ACTION_INDEX,
@@ -289,21 +300,29 @@ class Seq2SeqAgent(BaseAgent):
         ended = np.array([False] * batch_size)
         env_action = [None] * batch_size
         sequence_scores = try_cuda(torch.zeros(batch_size))
-        all_action_scores = []
-        for _ in range(batch_size):
-            all_action_scores.append([])
+
+        traj = [{
+            'instr_id': path_o[0]['instr_id'],
+            'trajectory': [path_element_from_observation(path_o[0])],
+            'actions': [],
+            'scores': [],
+            'observations': [path_o[0]],
+            'instr_encoding': path_o[0]['instr_encoding']
+        } for path_o in path_obs]
 
         obs = None
         for t in range(self.episode_len):
             next_obs = []
             next_target_list = []
-            for i, (path_o, path_a) in enumerate(zip(path_obs, path_actions)):
+            for perm_index, src_index in enumerate(perm_indices):
+                path_o = path_obs[src_index]
+                path_a = path_actions[src_index]
                 if t < len(path_a):
                     next_target_list.append(path_a[t])
                     next_obs.append(path_o[t])
                 else:
                     next_target_list.append(IGNORE_ACTION_INDEX)
-                    next_obs.append(obs[i])
+                    next_obs.append(obs[perm_index])
 
             obs = next_obs
 
@@ -319,7 +338,7 @@ class Seq2SeqAgent(BaseAgent):
                     logit[i, FORWARD_ACTION_INDEX] = -float('inf')
 
             # Supervised training
-            self.loss += self.criterion(logit, target)
+            loss += self.criterion(logit, target)
 
             # Determine next model inputs
             a_t = target                # teacher forcing
@@ -334,9 +353,14 @@ class Seq2SeqAgent(BaseAgent):
             # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
 
             # Save trajectory output
-            for i,ob in enumerate(obs):
-                if not ended[i]:
-                    all_action_scores[i].append(action_scores[i])
+            for perm_index, src_index in enumerate(perm_indices):
+                ob = obs[perm_index]
+                if not ended[perm_index]:
+                    traj[src_index]['trajectory'].append(path_element_from_observation(ob))
+                    traj[src_index]['score'] = sequence_scores[perm_index]
+                    traj[src_index]['scores'].append(action_scores[perm_index])
+                    traj[src_index]['actions'].append(a_t.data[perm_index])
+                    traj[src_index]['observations'].append(ob)
 
             # Update ended list
             for i in range(batch_size):
@@ -348,10 +372,7 @@ class Seq2SeqAgent(BaseAgent):
             if ended.all():
                 break
 
-        #self.losses.append(self.loss.data[0] / self.episode_len)
-        # shouldn't divide by the episode length because of masking
-        self.losses.append(self.loss.data[0])
-        return all_action_scores
+        return traj, loss
 
     def _rollout_with_loss(self):
         initial_world_states = self.env.reset(sort=True)
