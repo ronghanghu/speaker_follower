@@ -14,7 +14,7 @@ import torch.distributions as D
 
 from utils import vocab_pad_idx, vocab_eos_idx, flatten, structured_map, try_cuda
 
-from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, LEFT_ACTION_INDEX, RIGHT_ACTION_INDEX, START_ACTION_INDEX, END_ACTION_INDEX, FORWARD_ACTION_INDEX, index_action_tuple
+#from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, LEFT_ACTION_INDEX, RIGHT_ACTION_INDEX, START_ACTION_INDEX, END_ACTION_INDEX, FORWARD_ACTION_INDEX, index_action_tuple
 
 InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, action_count, score")
 
@@ -182,23 +182,24 @@ class RandomAgent(BaseAgent):
             'instr_id': ob['instr_id'],
             'trajectory': [path_element_from_observation(ob)]
         } for ob in obs]
-        self.steps = random.sample(list(range(-11,1)), len(obs))
         ended = [False] * len(obs)
-        for t in range(30):
+
+        self.steps = [0] * len(obs)
+        for t in range(6):
             actions = []
-            for i,ob in enumerate(obs):
+            for i, ob in enumerate(obs):
                 if self.steps[i] >= 5:
-                    actions.append((0, 0, 0)) # do nothing, i.e. end
+                    actions.append(0)  # do nothing, i.e. end
                     ended[i] = True
-                elif self.steps[i] < 0:
-                    actions.append((0, 1, 0)) # turn right (direction choosing)
-                    self.steps[i] += 1
-                elif len(ob['navigableLocations']) > 1:
-                    actions.append((1, 0, 0)) # go forward
+                elif self.steps[i] == 0:
+                    a = np.random.randint(len(ob['adj_loc_list']) - 1) + 1
+                    actions.append(a)  # choose a random adjacent loc
                     self.steps[i] += 1
                 else:
-                    actions.append((0, 1, 0)) # turn right until we can go forward
-            world_states = self.env.step(world_states, actions)
+                    assert len(ob['adj_loc_list']) > 1
+                    actions.append(1)  # go forward
+                    self.steps[i] += 1
+            world_states = self.env.step(world_states, actions, obs)
             obs = self.env.observe(world_states)
             for i,ob in enumerate(obs):
                 if not ended[i]:
@@ -225,11 +226,11 @@ class Seq2SeqAgent(BaseAgent):
     ''' An agent based on an LSTM seq2seq model with attention. '''
 
     # For now, the agent can't pick which forward move to make - just the one in the middle
-    env_actions = FOLLOWER_ENV_ACTIONS
-    start_index = START_ACTION_INDEX
-    ignore_index = IGNORE_ACTION_INDEX
-    forward_index = FORWARD_ACTION_INDEX
-    end_index = END_ACTION_INDEX
+    # env_actions = FOLLOWER_ENV_ACTIONS
+    # start_index = START_ACTION_INDEX
+    # ignore_index = IGNORE_ACTION_INDEX
+    # forward_index = FORWARD_ACTION_INDEX
+    # end_index = END_ACTION_INDEX
     feedback_options = ['teacher', 'argmax', 'sample']
 
     def __init__(self, env, results_path, encoder, decoder, episode_len=20, beam_size=1, reverse_instruction=True, max_instruction_length=80):
@@ -243,13 +244,13 @@ class Seq2SeqAgent(BaseAgent):
         self.reverse_instruction = reverse_instruction
         self.max_instruction_length = max_instruction_length
 
-    @staticmethod
-    def n_inputs():
-        return len(FOLLOWER_MODEL_ACTIONS)
-
-    @staticmethod
-    def n_outputs():
-        return len(FOLLOWER_MODEL_ACTIONS)-2 # Model doesn't output start or ignore
+    # @staticmethod
+    # def n_inputs():
+    #     return len(FOLLOWER_MODEL_ACTIONS)
+    #
+    # @staticmethod
+    # def n_outputs():
+    #     return len(FOLLOWER_MODEL_ACTIONS)-2 # Model doesn't output start or ignore
 
     def _feature_variables(self, obs, beamed=False):
         ''' Extract precomputed features into variable. '''
