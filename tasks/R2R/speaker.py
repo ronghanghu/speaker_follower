@@ -173,9 +173,9 @@ class Seq2SeqSpeaker(object):
             for perm_index, src_index in enumerate(perm_indices):
                 word_idx = w_t[perm_index].data[0]
                 if not ended[perm_index]:
-                    outputs[src_index]['word_indices'].append(word_idx)
-                    outputs[src_index]['score'] = sequence_scores[perm_index]
-                    outputs[src_index]['scores'].append(word_scores[perm_index].data)
+                    outputs[src_index]['word_indices'].append(int(word_idx))
+                    outputs[src_index]['score'] = float(sequence_scores[perm_index])
+                    outputs[src_index]['scores'].append(word_scores[perm_index].data.tolist())
                 if word_idx == vocab_eos_idx:
                     ended[perm_index] = True
 
