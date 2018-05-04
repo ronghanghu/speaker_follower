@@ -31,15 +31,15 @@ PLOT_DIR = 'tasks/R2R/plots/'
 MAX_INPUT_LENGTH = 80
 
 BATCH_SIZE = 100
-max_episode_len = 20
-word_embedding_size = 256
-action_embedding_size = 32
+max_episode_len = 10
+word_embedding_size = 300
+action_embedding_size = 2048+128
 hidden_size = 512
 dropout_ratio = 0.5
 #feedback_method = 'sample' # teacher or sample
 learning_rate = 0.0001
 weight_decay = 0.0005
-FEATURE_SIZE = 2048
+FEATURE_SIZE = 2048+128
 log_every=100
 #log_every=20
 save_every=1000
@@ -93,7 +93,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
 
         save_log = []
         # Run validation
-        for env_name, (env, evaluator) in val_envs.items():
+        for env_name, (env, evaluator) in sorted(val_envs.items()):
             agent.env = env
             # Get validation loss under the same conditions as training
             agent.test(use_dropout=True, feedback=args.feedback_method, allow_cheat=True)
@@ -109,7 +109,7 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
             score_summary, _ = evaluator.score_results(agent.results)
 
             loss_str += ', %s loss: %.4f' % (env_name, val_loss_avg)
-            for metric,val in score_summary.items():
+            for metric,val in sorted(score_summary.items()):
                 data_log['%s %s' % (env_name,metric)].append(val)
                 if metric in ['success_rate']:
                     loss_str += ', %s: %.3f' % (metric, val)
@@ -161,16 +161,17 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits, batch
     enc_hidden_size = hidden_size//2 if args.bidirectional else hidden_size
     encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, vocab_pad_idx,
                                    dropout_ratio, bidirectional=args.bidirectional))
-    image_attention_layers = make_image_attention_layers(args, image_features_list, hidden_size)
-    feature_size = 0
-    assert len(image_attention_layers) == len(image_features_list)
-    for layer, features in zip(image_attention_layers, image_features_list):
-        if layer:
-            feature_size += layer.feature_size
-        else:
-            feature_size += features.feature_dim
-    decoder = try_cuda(AttnDecoderLSTM(Seq2SeqAgent.n_inputs(), Seq2SeqAgent.n_outputs(),
-                                       action_embedding_size, hidden_size, dropout_ratio,
+    # image_attention_layers = make_image_attention_layers(args, image_features_list, hidden_size)
+    # feature_size = 0
+    # assert len(image_attention_layers) == len(image_features_list)
+    # for layer, features in zip(image_attention_layers, image_features_list):
+    #     if layer:
+    #         feature_size += layer.feature_size
+    #     else:
+    #         feature_size += features.feature_dim
+    feature_size = 2048 + 128
+    image_attention_layers = None
+    decoder = try_cuda(AttnDecoderLSTM(action_embedding_size, hidden_size, dropout_ratio,
                                        feature_size=feature_size,
                                        image_attention_layers=image_attention_layers))
     test_envs = {split: (R2RBatch(image_features_list, batch_size=batch_size, splits=[split], tokenizer=tok), eval.Evaluation([split]))
@@ -230,4 +231,3 @@ def make_arg_parser():
 if __name__ == "__main__":
     utils.run(make_arg_parser(), train_val)
     #test_submission()
-

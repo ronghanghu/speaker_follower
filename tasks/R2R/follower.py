@@ -233,13 +233,13 @@ class Seq2SeqAgent(BaseAgent):
     # end_index = END_ACTION_INDEX
     feedback_options = ['teacher', 'argmax', 'sample']
 
-    def __init__(self, env, results_path, encoder, decoder, episode_len=20, beam_size=1, reverse_instruction=True, max_instruction_length=80):
+    def __init__(self, env, results_path, encoder, decoder, episode_len=10, beam_size=1, reverse_instruction=True, max_instruction_length=80):
         super(Seq2SeqAgent, self).__init__(env, results_path)
         self.encoder = encoder
         self.decoder = decoder
         self.episode_len = episode_len
         self.losses = []
-        self.criterion = nn.CrossEntropyLoss(ignore_index=self.ignore_index)
+        self.criterion = nn.CrossEntropyLoss(ignore_index=-1)
         self.beam_size = beam_size
         self.reverse_instruction = reverse_instruction
         self.max_instruction_length = max_instruction_length
@@ -261,16 +261,33 @@ class Seq2SeqAgent(BaseAgent):
             batched.append(featurizer.batch_features(feature_list))
         return batched
 
+    def _action_variable(self, obs):
+        # get the maximum number of actions of all sample in this batch
+        max_num_a = -1
+        for i, ob in enumerate(obs):
+            max_num_a = max(max_num_a, len(ob['adj_loc_list']))
+
+        is_valid = np.zeros((len(obs), max_num_a), np.float32)
+        action_embedding_dim = obs[0]['action_embedding'].shape[-1]
+        action_embeddings = np.zeros(
+            (len(obs), max_num_a, action_embedding_dim),
+            dtype=np.float32)
+        for i, ob in enumerate(obs):
+            adj_loc_list = ob['adj_loc_list']
+            num_a = len(adj_loc_list)
+            is_valid[i, 0:num_a] = 1.
+            for n_a, adj_dict in enumerate(adj_loc_list):
+                action_embeddings[i, :num_a, :] = ob['action_embedding']
+        return (
+            Variable(torch.from_numpy(action_embeddings), requires_grad=False).cuda(),
+            Variable(torch.from_numpy(is_valid), requires_grad=False).cuda())
+
     def _teacher_action(self, obs, ended):
         ''' Extract teacher actions into variable. '''
         a = torch.LongTensor(len(obs))
         for i,ob in enumerate(obs):
             # Supervised teacher only moves one axis at a time
-            action_tuple = ob['teacher']
-            index = index_action_tuple(action_tuple)
-            if index == self.end_index and ended[i]:
-                index = self.ignore_index
-            a[i] = index
+            a[i] = ob['teacher'] if not ended[i] else -1
         return try_cuda(Variable(a, requires_grad=False))
 
     def _proc_batch(self, obs, beamed=False):
@@ -281,99 +298,100 @@ class Seq2SeqAgent(BaseAgent):
         if self.beam_size == 1:
             return self._rollout_with_loss()
         else:
+            raise NotImplementedError('beam search has not been implemented yet')
             assert self.beam_size >= 1
             beams = self.beam_search(self.beam_size)
             return [beam[0] for beam in beams]
 
-    def _score_obs_actions_and_instructions(self, path_obs, path_actions, encoded_instructions):
-        batch_size = len(path_obs)
-        assert len(path_actions) == batch_size
-        assert len(encoded_instructions) == batch_size
-        for path_o, path_a in zip(path_obs, path_actions):
-            assert len(path_o) == len(path_a) + 1
-
-        seq, seq_mask, seq_lengths, perm_indices = batch_instructions_from_encoded(encoded_instructions, self.max_instruction_length, reverse=self.reverse_instruction, sort=True)
-        loss = 0
-
-        ctx, h_t, c_t = self.encoder(seq, seq_lengths)
-        a_t = try_cuda(Variable(torch.ones(batch_size).long() * START_ACTION_INDEX,
-                                requires_grad=False))
-        ended = np.array([False] * batch_size)
-        env_action = [None] * batch_size
-        sequence_scores = try_cuda(torch.zeros(batch_size))
-
-        traj = [{
-            'instr_id': path_o[0]['instr_id'],
-            'trajectory': [path_element_from_observation(path_o[0])],
-            'actions': [],
-            'scores': [],
-            'observations': [path_o[0]],
-            'instr_encoding': path_o[0]['instr_encoding']
-        } for path_o in path_obs]
-
-        obs = None
-        for t in range(self.episode_len):
-            next_obs = []
-            next_target_list = []
-            for perm_index, src_index in enumerate(perm_indices):
-                path_o = path_obs[src_index]
-                path_a = path_actions[src_index]
-                if t < len(path_a):
-                    next_target_list.append(path_a[t])
-                    next_obs.append(path_o[t])
-                else:
-                    next_target_list.append(IGNORE_ACTION_INDEX)
-                    next_obs.append(obs[perm_index])
-
-            obs = next_obs
-
-            target = try_cuda(Variable(torch.LongTensor(next_target_list), requires_grad=False))
-
-            f_t_list = self._feature_variables(obs) # Image features from obs
-            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t_list, h_t, c_t, ctx, seq_mask)
-            # Mask outputs where agent can't move forward
-            blocked_indices = []
-            for i,ob in enumerate(obs):
-                if len(ob['navigableLocations']) <= 1:
-                    blocked_indices.append(i)
-                    logit[i, FORWARD_ACTION_INDEX] = -float('inf')
-
-            # Supervised training
-            loss += self.criterion(logit, target)
-
-            # Determine next model inputs
-            a_t = target                # teacher forcing
-
-            action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
-            sequence_scores += action_scores
-
-            for i in range(batch_size):
-                action_idx = a_t[i].data[0]
-                env_action[i] = self.env_actions[action_idx]
-
-            # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
-
-            # Save trajectory output
-            for perm_index, src_index in enumerate(perm_indices):
-                ob = obs[perm_index]
-                if not ended[perm_index]:
-                    traj[src_index]['trajectory'].append(path_element_from_observation(ob))
-                    traj[src_index]['score'] = sequence_scores[perm_index]
-                    traj[src_index]['scores'].append(action_scores[perm_index])
-                    traj[src_index]['actions'].append(a_t.data[perm_index])
-                    traj[src_index]['observations'].append(ob)
-
-            # Update ended list
-            for i in range(batch_size):
-                action_idx = a_t[i].data[0]
-                if action_idx == END_ACTION_INDEX:
-                    ended[i] = True
-
-            # Early exit if all ended
-            if ended.all():
-                break
-
-        return traj, loss
+    # def _score_obs_actions_and_instructions(self, path_obs, path_actions, encoded_instructions):
+    #     batch_size = len(path_obs)
+    #     assert len(path_actions) == batch_size
+    #     assert len(encoded_instructions) == batch_size
+    #     for path_o, path_a in zip(path_obs, path_actions):
+    #         assert len(path_o) == len(path_a) + 1
+    #
+    #     seq, seq_mask, seq_lengths, perm_indices = batch_instructions_from_encoded(encoded_instructions, self.max_instruction_length, reverse=self.reverse_instruction, sort=True)
+    #     loss = 0
+    #
+    #     ctx, h_t, c_t = self.encoder(seq, seq_lengths)
+    #     a_t = try_cuda(Variable(torch.ones(batch_size).long() * START_ACTION_INDEX,
+    #                             requires_grad=False))
+    #     ended = np.array([False] * batch_size)
+    #     env_action = [None] * batch_size
+    #     sequence_scores = try_cuda(torch.zeros(batch_size))
+    #
+    #     traj = [{
+    #         'instr_id': path_o[0]['instr_id'],
+    #         'trajectory': [path_element_from_observation(path_o[0])],
+    #         'actions': [],
+    #         'scores': [],
+    #         'observations': [path_o[0]],
+    #         'instr_encoding': path_o[0]['instr_encoding']
+    #     } for path_o in path_obs]
+    #
+    #     obs = None
+    #     for t in range(self.episode_len):
+    #         next_obs = []
+    #         next_target_list = []
+    #         for perm_index, src_index in enumerate(perm_indices):
+    #             path_o = path_obs[src_index]
+    #             path_a = path_actions[src_index]
+    #             if t < len(path_a):
+    #                 next_target_list.append(path_a[t])
+    #                 next_obs.append(path_o[t])
+    #             else:
+    #                 next_target_list.append(IGNORE_ACTION_INDEX)
+    #                 next_obs.append(obs[perm_index])
+    #
+    #         obs = next_obs
+    #
+    #         target = try_cuda(Variable(torch.LongTensor(next_target_list), requires_grad=False))
+    #
+    #         f_t_list = self._feature_variables(obs) # Image features from obs
+    #         h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t_list, h_t, c_t, ctx, seq_mask)
+    #         # Mask outputs where agent can't move forward
+    #         blocked_indices = []
+    #         for i,ob in enumerate(obs):
+    #             if len(ob['navigableLocations']) <= 1:
+    #                 blocked_indices.append(i)
+    #                 logit[i, FORWARD_ACTION_INDEX] = -float('inf')
+    #
+    #         # Supervised training
+    #         loss += self.criterion(logit, target)
+    #
+    #         # Determine next model inputs
+    #         a_t = target                # teacher forcing
+    #
+    #         action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
+    #         sequence_scores += action_scores
+    #
+    #         for i in range(batch_size):
+    #             action_idx = a_t[i].data[0]
+    #             env_action[i] = self.env_actions[action_idx]
+    #
+    #         # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
+    #
+    #         # Save trajectory output
+    #         for perm_index, src_index in enumerate(perm_indices):
+    #             ob = obs[perm_index]
+    #             if not ended[perm_index]:
+    #                 traj[src_index]['trajectory'].append(path_element_from_observation(ob))
+    #                 traj[src_index]['score'] = sequence_scores[perm_index]
+    #                 traj[src_index]['scores'].append(action_scores[perm_index])
+    #                 traj[src_index]['actions'].append(a_t.data[perm_index])
+    #                 traj[src_index]['observations'].append(ob)
+    #
+    #         # Update ended list
+    #         for i in range(batch_size):
+    #             action_idx = a_t[i].data[0]
+    #             if action_idx == END_ACTION_INDEX:
+    #                 ended[i] = True
+    #
+    #         # Early exit if all ended
+    #         if ended.all():
+    #             break
+    #
+    #     return traj, loss
 
     def _rollout_with_loss(self):
         initial_world_states = self.env.reset(sort=True)
@@ -392,6 +410,7 @@ class Seq2SeqAgent(BaseAgent):
         feedback = self.feedback
 
         ctx,h_t,c_t = self.encoder(seq, seq_lengths)
+
         # Record starting point
         traj = [{
             'instr_id': ob['instr_id'],
@@ -406,8 +425,7 @@ class Seq2SeqAgent(BaseAgent):
         world_states = initial_world_states
 
         # Initial action
-        a_t = try_cuda(Variable(torch.ones(batch_size).long() * START_ACTION_INDEX,
-                                requires_grad=False))
+        u_t_prev = self.decoder.u_begin.expand(batch_size, -1)  # init action
         ended = np.array([False] * batch_size) # Indices match permuation of the model, not env
 
         # Do a sequence rollout and calculate the loss
@@ -415,13 +433,14 @@ class Seq2SeqAgent(BaseAgent):
         sequence_scores = try_cuda(torch.zeros(batch_size))
         for t in range(self.episode_len):
             f_t_list = self._feature_variables(obs) # Image features from obs
-            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t_list, h_t, c_t, ctx, seq_mask)
-            # Mask outputs where agent can't move forward
-            blocked_indices = []
-            for i,ob in enumerate(obs):
-                if len(ob['navigableLocations']) <= 1:
-                    blocked_indices.append(i)
-                    logit[i, FORWARD_ACTION_INDEX] = -float('inf')
+            all_u_t, is_valid = self._action_variable(obs)
+
+            assert len(f_t_list) == 1, 'for now, only work with MeanPooled feature'
+            h_t, c_t, alpha, logit, alpha_v = self.decoder(
+                u_t_prev, all_u_t, f_t_list[0], h_t, c_t, ctx, seq_mask)
+
+            # Mask outputs of invalid actions
+            logit[is_valid == 0] = -float('inf')
 
             # Supervised training
             target = self._teacher_action(obs, ended)
@@ -429,34 +448,35 @@ class Seq2SeqAgent(BaseAgent):
 
             # Determine next model inputs
             if feedback == 'teacher':
-                a_t = target                # teacher forcing
+                # turn -1 (ignore) to 0 (stop) so that the action is executable
+                a_t = torch.clamp(target, min=0)
             elif feedback == 'argmax':
                 _,a_t = logit.max(1)        # student forcing - argmax
                 a_t = a_t.detach()
             elif feedback == 'sample':
                 probs = F.softmax(logit, dim=1)    # sampling an action from model
+                # Further mask probs where agent can't move forward
+                # Note input to `D.Categorical` does not have to sum up to 1
+                # http://pytorch.org/docs/stable/torch.html#torch.multinomial
+                probs[is_valid == 0] = 0.
                 m = D.Categorical(probs)
-                sampled_blocked = True
-                while sampled_blocked:
-                    a_t = m.sample()            # sampling an action from model
-                    if blocked_indices:
-                        sampled_blocked = any(a_t.data[blocked_indices] == FORWARD_ACTION_INDEX)
-                    else:
-                        sampled_blocked = False
-                #a_t = probs.multinomial(1).detach().squeeze(-1)
+                a_t = m.sample()
             else:
                 sys.exit('Invalid feedback option')
 
-            action_scores = -F.cross_entropy(logit, a_t, ignore_index=self.ignore_index, reduce=False).data
+            # update the previous action
+            u_t_prev = all_u_t[np.arange(batch_size), a_t, :].detach()
+
+            action_scores = -F.cross_entropy(logit, a_t, ignore_index=-1, reduce=False).data
             sequence_scores += action_scores
 
             # dfried: I changed this so that the ended list is updated afterward; this causes <end> to be added as the last action, along with its score, and the final world state will be duplicated (to more closely match beam search)
             # Make environment action
             for i in range(batch_size):
                 action_idx = a_t[i].data[0]
-                env_action[i] = self.env_actions[action_idx]
+                env_action[i] = action_idx
 
-            world_states = self.env.step(world_states, env_action)
+            world_states = self.env.step(world_states, env_action, obs)
             obs = self.env.observe(world_states)
             # print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, world_states[0], a_t.data[0], sequence_scores[0]))
 
@@ -472,7 +492,7 @@ class Seq2SeqAgent(BaseAgent):
             # Update ended list
             for i in range(batch_size):
                 action_idx = a_t[i].data[0]
-                if action_idx == END_ACTION_INDEX:
+                if action_idx == 0:
                     ended[i] = True
 
             # Early exit if all ended

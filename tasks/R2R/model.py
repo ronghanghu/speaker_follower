@@ -1,4 +1,4 @@
-
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -220,52 +220,103 @@ class BottomUpImageAttention(nn.Module):
         attended_feats = torch.bmm(attention, feats).squeeze(1) # batch_size x feat_size
         return attended_feats, attention
 
+
+class VisualSoftDotAttention(nn.Module):
+    ''' Visual Dot Attention Layer. '''
+
+    def __init__(self, h_dim, v_dim, dot_dim=256):
+        '''Initialize layer.'''
+        super(VisualSoftDotAttention, self).__init__()
+        self.linear_in_h = nn.Linear(h_dim, dot_dim, bias=True)
+        self.linear_in_v = nn.Linear(v_dim, dot_dim, bias=True)
+        self.sm = nn.Softmax(dim=1)
+
+    def forward(self, h, visual_context, mask=None):
+        '''Propagate h through the network.
+
+        h: batch x h_dim
+        visual_context: batch x v_num x v_dim
+        '''
+        target = self.linear_in_h(h).unsqueeze(2)  # batch x dot_dim x 1
+        context = self.linear_in_v(visual_context)  # batch x v_num x dot_dim
+
+        # Get attention
+        attn = torch.bmm(context, target).squeeze(2)  # batch x v_num
+        attn = self.sm(attn)
+        attn3 = attn.view(attn.size(0), 1, attn.size(1))  # batch x 1 x v_num
+
+        weighted_context = torch.bmm(
+            attn3, visual_context).squeeze(1)  # batch x v_dim
+        return weighted_context, attn
+
+
+class EltwiseProdScoring(nn.Module):
+    '''
+    Linearly mapping h and v to the same dimension, and do a elementwise
+    multiplication and a linear scoring
+    '''
+
+    def __init__(self, h_dim, a_dim, dot_dim=256):
+        '''Initialize layer.'''
+        super(EltwiseProdScoring, self).__init__()
+        self.linear_in_h = nn.Linear(h_dim, dot_dim, bias=True)
+        self.linear_in_a = nn.Linear(a_dim, dot_dim, bias=True)
+        self.linear_out = nn.Linear(dot_dim, 1, bias=True)
+
+    def forward(self, h, all_u_t, mask=None):
+        '''Propagate h through the network.
+
+        h: batch x h_dim
+        all_u_t: batch x a_num x a_dim
+        '''
+        target = self.linear_in_h(h).unsqueeze(1)  # batch x 1 x dot_dim
+        context = self.linear_in_a(all_u_t)  # batch x a_num x dot_dim
+        eltprod = torch.mul(target, context)  # batch x a_num x dot_dim
+        logits = self.linear_out(eltprod).squeeze(2)  # batch x a_num
+        return logits
+
+
 class AttnDecoderLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
 
-    def __init__(self, input_action_size, output_action_size, embedding_size, hidden_size,
-                      dropout_ratio, feature_size=2048, image_attention_layers=None):
+    def __init__(self, embedding_size, hidden_size, dropout_ratio,
+                 feature_size=2048+128, image_attention_layers=None):
         super(AttnDecoderLSTM, self).__init__()
         self.embedding_size = embedding_size
         self.feature_size = feature_size
         self.hidden_size = hidden_size
-        self.embedding = nn.Embedding(input_action_size, embedding_size)
+        # self.embedding = nn.Embedding(input_action_size, embedding_size)
+        u_std = np.sqrt(1. / embedding_size)
+        self.u_begin = nn.Parameter(torch.from_numpy(np.random.normal(
+            0, u_std, (1, embedding_size)).astype(np.float32))).cuda()
         self.drop = nn.Dropout(p=dropout_ratio)
         self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
-        self.attention_layer = SoftDotAttention(hidden_size)
-        self.decoder2action = nn.Linear(hidden_size, output_action_size)
-        self.image_attention_layers = image_attention_layers
+        self.visual_attention_layer = VisualSoftDotAttention(
+            hidden_size, feature_size)
+        self.text_attention_layer = SoftDotAttention(hidden_size)
+        self.decoder2action = EltwiseProdScoring(hidden_size, embedding_size)
 
-    def forward(self, action, feature_list, h_0, c_0, ctx, ctx_mask=None):
+    def forward(self, u_t_prev, all_u_t, visual_context, h_0, c_0, ctx,
+                ctx_mask=None):
         ''' Takes a single step in the decoder LSTM (allowing sampling).
 
-        action: batch x 1
-        feature: batch x feature_size
+        u_t_prev: batch x embedding_size
+        all_u_t: batch x a_num x embedding_size
+        visual_context: batch x v_num x feature_size
         h_0: batch x hidden_size
         c_0: batch x hidden_size
         ctx: batch x seq_len x dim
         ctx_mask: batch x seq_len - indices to be masked
         '''
-        action_embeds = self.embedding(action)   # (batch, 1, embedding_size)
-        action_embeds = action_embeds.squeeze(1)
-
-        inputs, attentions = [action_embeds], []
-        for feature, attention_layer in zip(feature_list, self.image_attention_layers):
-            if attention_layer:
-                attended_feature, attention = attention_layer(feature, h_0)
-            else:
-                attended_feature = feature
-                attention = None
-            inputs.append(attended_feature)
-            attentions.append(attention)
-
-        concat_input = torch.cat(inputs , 1) # (batch, embedding_size+feature_size)
+        feature, alpha_v = self.visual_attention_layer(h_0, visual_context)
+        # (batch, embedding_size+feature_size)
+        concat_input = torch.cat((u_t_prev, feature), 1)
         drop = self.drop(concat_input)
-        h_1,c_1 = self.lstm(drop, (h_0,c_0))
+        h_1, c_1 = self.lstm(drop, (h_0, c_0))
         h_1_drop = self.drop(h_1)
-        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
-        logit = self.decoder2action(h_tilde)
-        return h_1,c_1,alpha,attentions,logit
+        h_tilde, alpha = self.text_attention_layer(h_1_drop, ctx, ctx_mask)
+        logit = self.decoder2action(h_tilde, all_u_t)
+        return h_1, c_1, alpha, logit, alpha_v
 
 ## speaker models
 

@@ -85,13 +85,13 @@ def build_viewpoint_loc_embedding(viewIndex):
     """
     embedding = np.zeros((36, 128), np.float32)
     for absViewIndex in range(36):
-        relViewIndex = (absViewIndex - viewIndex) % 12
+        relViewIndex = (absViewIndex - viewIndex) % 12 + (absViewIndex // 12) * 12
         rel_heading = (relViewIndex % 12) * angle_inc
         rel_elevation = (relViewIndex // 12 - 1) * angle_inc
-        embedding[relViewIndex,  0:32] = np.sin(rel_heading)
-        embedding[relViewIndex, 32:64] = np.cos(rel_heading)
-        embedding[relViewIndex, 64:96] = np.sin(rel_elevation)
-        embedding[relViewIndex,   96:] = np.cos(rel_elevation)
+        embedding[absViewIndex,  0:32] = np.sin(rel_heading)
+        embedding[absViewIndex, 32:64] = np.cos(rel_heading)
+        embedding[absViewIndex, 64:96] = np.sin(rel_elevation)
+        embedding[absViewIndex,   96:] = np.cos(rel_elevation)
     return embedding
 
 
