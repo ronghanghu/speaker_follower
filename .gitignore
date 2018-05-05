@@ -20,3 +20,7 @@
 # intellij
 .idea/
 *.iml
+
+img_features
+tasks/R2R/speaker/
+

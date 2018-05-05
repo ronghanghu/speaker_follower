@@ -41,7 +41,7 @@ class EncoderLSTM(nn.Module):
         attention methods) and a decoder initial state. '''
 
     def __init__(self, vocab_size, embedding_size, hidden_size, padding_idx,
-                            dropout_ratio, bidirectional=False, num_layers=1):
+                            dropout_ratio, bidirectional=False, num_layers=1, glove=None):
         super(EncoderLSTM, self).__init__()
         self.embedding_size = embedding_size
         self.hidden_size = hidden_size
@@ -49,6 +49,11 @@ class EncoderLSTM(nn.Module):
         self.num_directions = 2 if bidirectional else 1
         self.num_layers = num_layers
         self.embedding = nn.Embedding(vocab_size, embedding_size, padding_idx)
+        self.use_glove = glove is not None
+        if self.use_glove:
+            print('Using GloVe embedding')
+            self.embedding.weight.data[...] = torch.from_numpy(glove)
+            self.embedding.weight.requires_grad = False
         self.lstm = nn.LSTM(embedding_size, hidden_size, self.num_layers,
                             batch_first=True, dropout=dropout_ratio,
                             bidirectional=bidirectional)
@@ -75,7 +80,8 @@ class EncoderLSTM(nn.Module):
             list of lengths for dynamic batching. '''
         batch_size = inputs.size(0)
         embeds = self.embedding(inputs)   # (batch, seq_len, embedding_size)
-        embeds = self.drop(embeds)
+        if not self.use_glove:
+            embeds = self.drop(embeds)
         h0, c0 = self.init_state(batch_size)
         packed_embeds = pack_padded_sequence(embeds, lengths, batch_first=True)
         enc_h, (enc_h_t, enc_c_t) = self.lstm(packed_embeds, (h0, c0))
@@ -376,12 +382,17 @@ class SpeakerEncoderLSTM(nn.Module):
 
 class SpeakerDecoderLSTM(nn.Module):
 
-    def __init__(self, vocab_size, vocab_embedding_size, hidden_size, dropout_ratio):
+    def __init__(self, vocab_size, vocab_embedding_size, hidden_size, dropout_ratio, glove=None):
         super(SpeakerDecoderLSTM, self).__init__()
         self.vocab_size = vocab_size
         self.vocab_embedding_size = vocab_embedding_size
         self.hidden_size = hidden_size
         self.embedding = nn.Embedding(vocab_size, vocab_embedding_size)
+        self.use_glove = glove is not None
+        if self.use_glove:
+            print('Using GloVe embedding')
+            self.embedding.weight.data[...] = torch.from_numpy(glove)
+            self.embedding.weight.requires_grad = False
         self.drop = nn.Dropout(p=dropout_ratio)
         self.lstm = nn.LSTMCell(vocab_embedding_size, hidden_size)
         self.attention_layer = SoftDotAttention(hidden_size)
@@ -399,8 +410,10 @@ class SpeakerDecoderLSTM(nn.Module):
         '''
         word_embeds = self.embedding(previous_word)   # (batch, 1, embedding_size)
         word_embeds = word_embeds.squeeze()
-
-        drop = self.drop(word_embeds)
+        if not self.use_glove:
+            drop = self.drop(word_embeds)
+        else:
+            drop = word_embeds
         h_1,c_1 = self.lstm(drop, (h_0,c_0))
         h_1_drop = self.drop(h_1)
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
