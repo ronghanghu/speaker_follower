@@ -15,7 +15,7 @@ import argparse
 
 import utils
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,vocab_pad_idx,timeSince, try_cuda
-from env import R2RBatch, ImageFeatures, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, MeanPooledImageFeatures, NoImageFeatures
+from env import R2RBatch, ImageFeatures, MeanPooledImageFeatures, NoImageFeatures
 import model
 from model import SpeakerEncoderLSTM, SpeakerDecoderLSTM
 from speaker import Seq2SeqSpeaker
@@ -31,9 +31,9 @@ PLOT_DIR = 'tasks/R2R/speaker/plots/'
 MAX_INSTRUCTION_LENGTH = 80
 
 batch_size = 100
-max_episode_len = 20
-word_embedding_size = 256
-action_embedding_size = 32
+max_episode_len = 10
+word_embedding_size = 300
+action_embedding_size = 2048+128
 hidden_size = 512
 bidirectional = False
 dropout_ratio = 0.5
@@ -48,7 +48,7 @@ save_every=1000
 
 def get_model_prefix(args, image_feature_list):
     image_feature_name = "+".join([featurizer.get_name() for featurizer in image_feature_list])
-    model_prefix = 'speaker_{}_{}'.format(feedback_method, image_feature_name)
+    model_prefix = 'panorama_speaker_{}_{}'.format(feedback_method, image_feature_name)
     if args.use_train_subset:
         model_prefix = 'trainsub_' + model_prefix
     return model_prefix
@@ -163,8 +163,9 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits, test_
     train_env = R2RBatch(image_features_list, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if bidirectional else hidden_size
-    encoder = try_cuda(SpeakerEncoderLSTM(len(FOLLOWER_ENV_ACTIONS), action_embedding_size, image_features.feature_dim,
-                                          enc_hidden_size, IGNORE_ACTION_INDEX, dropout_ratio, bidirectional=bidirectional))
+    feature_size = 2048 + 128
+    encoder = try_cuda(SpeakerEncoderLSTM(action_embedding_size, feature_size,
+                                          enc_hidden_size, dropout_ratio, bidirectional=bidirectional))
 
     decoder = try_cuda(SpeakerDecoderLSTM(len(vocab), word_embedding_size, hidden_size, dropout_ratio))
 

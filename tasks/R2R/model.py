@@ -321,63 +321,56 @@ class AttnDecoderLSTM(nn.Module):
 ## speaker models
 
 class SpeakerEncoderLSTM(nn.Module):
-    def __init__(self, num_actions, action_embedding_size, world_embedding_size, hidden_size, padding_idx,
-                 dropout_ratio, bidirectional=False, num_layers=1):
+    def __init__(self, action_embedding_size, world_embedding_size, hidden_size,
+                 dropout_ratio, bidirectional=False):
         super(SpeakerEncoderLSTM, self).__init__()
-        self.num_actions = num_actions
+        assert not bidirectional, 'Bidirectional is not implemented yet'
+
         self.action_embedding_size = action_embedding_size
         self.word_embedding_size = world_embedding_size
         self.hidden_size = hidden_size
         self.drop = nn.Dropout(p=dropout_ratio)
-        self.num_directions = 2 if bidirectional else 1
-        self.num_layers = num_layers
-        self.embedding = nn.Embedding(num_actions, action_embedding_size, padding_idx)
-        self.lstm = nn.LSTM(action_embedding_size + world_embedding_size, hidden_size, self.num_layers,
-                            batch_first=True, dropout=dropout_ratio,
-                            bidirectional=bidirectional)
-        self.encoder2decoder = nn.Linear(hidden_size * self.num_directions,
-                                         hidden_size * self.num_directions
-                                         )
+        self.visual_attention_layer = VisualSoftDotAttention(
+            hidden_size, world_embedding_size)
+        self.lstm = nn.LSTMCell(action_embedding_size + world_embedding_size, hidden_size)
+        self.encoder2decoder = nn.Linear(hidden_size, hidden_size)
 
     def init_state(self, batch_size):
         ''' Initialize to zero cell states and hidden states.'''
-        h0 = Variable(torch.zeros(
-            self.num_layers * self.num_directions,
-            batch_size,
-            self.hidden_size
-        ), requires_grad=False)
-        c0 = Variable(torch.zeros(
-            self.num_layers * self.num_directions,
-            batch_size,
-            self.hidden_size
-        ), requires_grad=False)
+        h0 = Variable(
+            torch.zeros(batch_size, self.hidden_size), requires_grad=False)
+        c0 = Variable(
+            torch.zeros(batch_size, self.hidden_size), requires_grad=False)
         return try_cuda(h0), try_cuda(c0)
 
-    def forward(self, action_inputs, world_state_embeddings, lengths):
+    def _forward_one_step(self, h_0, c_0, action_embedding, world_state_embedding):
+        feature, _ = self.visual_attention_layer(h_0, world_state_embedding)
+        concat_input = torch.cat((action_embedding, feature), 1)
+        drop = self.drop(concat_input)
+        h_1, c_1 = self.lstm(drop, (h_0, c_0))
+        return h_1, c_1
+
+    def forward(self, batched_action_embeddings, world_state_embeddings):
         ''' Expects action indices as (batch, seq_len). Also requires a
             list of lengths for dynamic batching. '''
-        batch_size = action_inputs.size(0)
-        assert batch_size == world_state_embeddings.size(0)
+        assert isinstance(batched_action_embeddings, list)
+        assert isinstance(world_state_embeddings, list)
+        assert len(batched_action_embeddings) == len(world_state_embeddings)
+        batch_size = world_state_embeddings[0].shape[0]
 
-        action_embeds = self.embedding(action_inputs)   # (batch, seq_len, embedding_size)
-        embeds = torch.cat([action_embeds, world_state_embeddings], dim=2)
-        embeds = self.drop(embeds)
-        h0, c0 = self.init_state(batch_size)
-        packed_embeds = pack_padded_sequence(embeds, lengths, batch_first=True)
-        enc_h, (enc_h_t, enc_c_t) = self.lstm(packed_embeds, (h0, c0))
+        h, c = self.init_state(batch_size)
+        h_list = []
+        for t, (action_embedding, world_state_embedding) in enumerate(
+                zip(batched_action_embeddings, world_state_embeddings)):
+            h, c = self._forward_one_step(
+                h, c, action_embedding, world_state_embedding)
+            h_list.append(h)
 
-        if self.num_directions == 2:
-            h_t = torch.cat((enc_h_t[-1], enc_h_t[-2]), 1)
-            c_t = torch.cat((enc_c_t[-1], enc_c_t[-2]), 1)
-        else:
-            h_t = enc_h_t[-1]
-            c_t = enc_c_t[-1] # (batch, hidden_size)
+        decoder_init = nn.Tanh()(self.encoder2decoder(h))
 
-        decoder_init = nn.Tanh()(self.encoder2decoder(h_t))
-
-        ctx, lengths = pad_packed_sequence(enc_h, batch_first=True)
+        ctx = torch.stack(h_list, dim=1)  # (batch, seq_len, hidden_size)
         ctx = self.drop(ctx)
-        return ctx,decoder_init,c_t  # (batch, seq_len, hidden_size*num_directions)
+        return ctx, decoder_init, c
         # (batch, hidden_size)
 
 
