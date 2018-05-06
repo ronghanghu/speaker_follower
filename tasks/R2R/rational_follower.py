@@ -88,8 +88,8 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
     accuracies_by_weight = {}
     index_counts_by_weight = {}
 
-
-    for speaker_weight in np.arange(0, 20 + 1) / 20.0:
+    for speaker_weight in [0.95]:  # Use 0.95 weight
+    # for speaker_weight in np.arange(0, 20 + 1) / 20.0:
         results = {}
         index_count = Counter()
 
@@ -148,7 +148,7 @@ def validate_entry_point(args):
     speaker, speaker_train_env, speaker_val_envs = train_speaker.train_setup(args)
     speaker.load(args.speaker_prefix, **load_args)
 
-    for env_name, (env, evaluator) in follower_val_envs.items():
+    for env_name, (env, evaluator) in sorted(follower_val_envs.items()):
         if args.output_file:
             output_file = "{}_{}.json".format(args.output_file, env_name)
         else:
