@@ -16,7 +16,7 @@ from utils import vocab_pad_idx, vocab_eos_idx, flatten, structured_map, try_cud
 
 #from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, LEFT_ACTION_INDEX, RIGHT_ACTION_INDEX, START_ACTION_INDEX, END_ACTION_INDEX, FORWARD_ACTION_INDEX, index_action_tuple
 
-InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, action_count, score")
+InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, last_action_embedding, action_count, score")
 
 def backchain_inference_states(last_inference_state):
     states = []
@@ -280,7 +280,8 @@ class Seq2SeqAgent(BaseAgent):
                 action_embeddings[i, :num_a, :] = ob['action_embedding']
         return (
             Variable(torch.from_numpy(action_embeddings), requires_grad=False).cuda(),
-            Variable(torch.from_numpy(is_valid), requires_grad=False).cuda())
+            Variable(torch.from_numpy(is_valid), requires_grad=False).cuda(),
+            is_valid)
 
     def _teacher_action(self, obs, ended):
         ''' Extract teacher actions into variable. '''
@@ -298,7 +299,6 @@ class Seq2SeqAgent(BaseAgent):
         if self.beam_size == 1:
             return self._rollout_with_loss()
         else:
-            raise NotImplementedError('beam search has not been implemented yet')
             assert self.beam_size >= 1
             beams = self.beam_search(self.beam_size)
             return [beam[0] for beam in beams]
@@ -433,7 +433,7 @@ class Seq2SeqAgent(BaseAgent):
         sequence_scores = try_cuda(torch.zeros(batch_size))
         for t in range(self.episode_len):
             f_t_list = self._feature_variables(obs) # Image features from obs
-            all_u_t, is_valid = self._action_variable(obs)
+            all_u_t, is_valid, _ = self._action_variable(obs)
 
             assert len(f_t_list) == 1, 'for now, only work with MeanPooled feature'
             h_t, c_t, alpha, logit, alpha_v = self.decoder(
@@ -525,7 +525,8 @@ class Seq2SeqAgent(BaseAgent):
                             world_state=ws[0],
                             observation=o[0],
                             flat_index=i,
-                            last_action=self.start_index,
+                            last_action=-1,
+                            last_action_embedding=self.decoder.u_begin.view(-1),
                             action_count=0,
                             score=0.0)]
             for i, (ws, o) in enumerate(zip(world_states, obs))
@@ -535,46 +536,32 @@ class Seq2SeqAgent(BaseAgent):
         for t in range(self.episode_len):
             flat_indices = []
             beam_indices = []
-            a_t_list = []
+            u_t_list = []
             for beam_index, beam in enumerate(beams):
                 for inf_state in beam:
                     beam_indices.append(beam_index)
                     flat_indices.append(inf_state.flat_index)
-                    a_t_list.append(inf_state.last_action)
+                    u_t_list.append(inf_state.last_action_embedding)
 
-            a_t = try_cuda(Variable(torch.LongTensor(a_t_list), requires_grad=False))
-            if len(a_t.shape) == 1:
-                a_t = a_t.unsqueeze(0)
+            u_t_prev = torch.stack(u_t_list, dim=0)
+            assert len(u_t_prev.shape) == 2
             flat_obs = flatten(obs)
             f_t_list = self._feature_variables(flat_obs) # Image features from obs
+            all_u_t, is_valid, is_valid_numpy = self._action_variable(flat_obs)
 
-            h_t,c_t,alpha,image_attention,logit = self.decoder(a_t.view(-1, 1), f_t_list, h_t[flat_indices], c_t[flat_indices], ctx[beam_indices], seq_mask[beam_indices])
+            assert len(f_t_list) == 1, 'for now, only work with MeanPooled feature'
+            h_t, c_t, alpha, logit, alpha_v = self.decoder(
+                u_t_prev, all_u_t, f_t_list[0], h_t[flat_indices], c_t[flat_indices], ctx[beam_indices], seq_mask[beam_indices])
 
-            # Mask outputs where agent can't move forward
-            no_forward_mask = [len(ob['navigableLocations']) <= 1 for ob in flat_obs]
+            # Mask outputs of invalid actions
+            logit[is_valid == 0] = -float('inf')
+            # # Mask outputs where agent can't move forward
+            # no_forward_mask = [len(ob['navigableLocations']) <= 1 for ob in flat_obs]
 
             if mask_undo:
                 masked_logit = logit.clone()
             else:
                 masked_logit = logit
-
-            invalid_actions = []
-            for i,no_forward in enumerate(no_forward_mask):
-                this_invalid = set()
-                if no_forward:
-                    logit[i, self.forward_index] = -float('inf')
-                    if mask_undo:
-                        masked_logit[i, self.forward_index] = -float('inf')
-                    this_invalid.add(self.forward_index)
-                if mask_undo:
-                    last_action = a_t_list[i]
-                    if last_action == LEFT_ACTION_INDEX:
-                        masked_logit[i, RIGHT_ACTION_INDEX] = -float('inf')
-                        this_invalid.add(RIGHT_ACTION_INDEX)
-                    elif last_action == RIGHT_ACTION_INDEX:
-                        masked_logit[i, LEFT_ACTION_INDEX] = -float('inf')
-                        this_invalid.add(LEFT_ACTION_INDEX)
-                invalid_actions.append(this_invalid)
 
             log_probs = F.log_softmax(logit, dim=1).data
 
@@ -592,24 +579,25 @@ class Seq2SeqAgent(BaseAgent):
             new_beams = []
             assert len(beams) == len(world_states)
             all_successors = []
-            for beam_index, (beam, beam_world_states) in enumerate(zip(beams, world_states)):
+            for beam_index, (beam, beam_world_states, beam_obs) in enumerate(zip(beams, world_states, obs)):
                 successors = []
                 end_index = start_index + len(beam)
                 assert len(beam_world_states) == len(beam)
+                assert len(beam_obs) == len(beam)
                 if beam:
-                    for inf_index, (inf_state, world_state, action_score_row, action_index_row) in \
-                            enumerate(zip(beam, beam_world_states, action_scores[start_index:end_index], action_indices[start_index:end_index])):
+                    for inf_index, (inf_state, world_state, ob, action_score_row, action_index_row) in \
+                            enumerate(zip(beam, beam_world_states, beam_obs, action_scores[start_index:end_index], action_indices[start_index:end_index])):
+                        flat_index = start_index + inf_index
                         for action_score, action_index in zip(action_score_row, action_index_row):
-                            flat_index = start_index + inf_index
-                            if action_index in invalid_actions[flat_index]:
-                            #if no_forward_mask[flat_index] and action_index == self.forward_index:
+                            if is_valid_numpy[flat_index, action_index] == 0:
                                 continue
                             successors.append(
                                 InferenceState(prev_inference_state=inf_state,
                                                world_state=world_state, # will be updated later after successors are pruned
-                                               observation=None, # will be updated later after successors are pruned
+                                               observation=ob, # will be updated later after successors are pruned
                                                flat_index=flat_index,
                                                last_action=action_index,
+                                               last_action_embedding=all_u_t[flat_index, action_index].detach(),
                                                action_count=inf_state.action_count + 1,
                                                score=inf_state.score + action_score)
                             )
@@ -623,11 +611,16 @@ class Seq2SeqAgent(BaseAgent):
             ]
 
             successor_env_actions = [
-                [self.env_actions[inf_state.last_action] for inf_state in successors]
+                [inf_state.last_action for inf_state in successors]
                 for successors in all_successors
             ]
 
-            successor_world_states = self.env.step(successor_world_states, successor_env_actions, beamed=True)
+            successor_last_obs = [
+                [inf_state.observation for inf_state in successors]
+                for successors in all_successors
+            ]
+
+            successor_world_states = self.env.step(successor_world_states, successor_env_actions, successor_last_obs, beamed=True)
             successor_obs = self.env.observe(successor_world_states, beamed=True)
 
             all_successors = structured_map(lambda inf_state, world_state, obs: inf_state._replace(world_state=world_state, observation=obs),
@@ -639,7 +632,7 @@ class Seq2SeqAgent(BaseAgent):
             for beam_index, successors in enumerate(all_successors):
                 new_beam = []
                 for successor in successors:
-                    if successor.last_action == self.end_index or t == self.episode_len - 1:
+                    if successor.last_action == 0 or t == self.episode_len - 1:
                         completed[beam_index].append(successor)
                     else:
                         new_beam.append(successor)

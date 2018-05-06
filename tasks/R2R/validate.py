@@ -4,7 +4,7 @@ import train
 from follower import Seq2SeqAgent
 
 def validate_entry_point(args):
-    agent, train_env, val_envs = train.train_setup(args)
+    agent, train_env, val_envs = train.train_setup(args, args.batch_size)
     agent.load(args.model_prefix)
 
     for env_name, (env, evaluator) in sorted(val_envs.items()):
@@ -28,6 +28,7 @@ def make_arg_parser():
     parser = train.make_arg_parser()
     parser.add_argument("model_prefix")
     parser.add_argument("--beam_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=100)
     return parser
 
 if __name__ == "__main__":

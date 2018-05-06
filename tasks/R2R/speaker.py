@@ -97,6 +97,7 @@ class Seq2SeqSpeaker(object):
             obs = obs[:-1]
             mask[i, :len(actions)] = 0
             for t, (ob, a) in enumerate(zip(obs, actions)):
+                assert a >= 0
                 batched_image_features[t][i] = ob['feature'][0]
                 batched_action_embeddings[t][i] = ob['action_embedding'][a]
         batched_action_embeddings = [
