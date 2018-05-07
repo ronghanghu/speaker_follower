@@ -63,6 +63,8 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
                 assert candidate['instr_id'] == speaker_scored_candidate['instr_id']
                 candidate['follower_score'] = candidate['score']
                 candidate['speaker_score'] = speaker_scored_candidate['score']
+                # Delete the unnecessary keys not needed for later processing
+                del candidate['observations']
                 if compute_oracle:
                     candidate['eval_result'] = evaluator._score_item(candidate['instr_id'], candidate['trajectory'])._asdict()
             start_index += len(instance_candidates)
@@ -126,8 +128,7 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
         with open(output_file, 'w') as f:
             for candidate_list in candidate_lists_by_instr_id.values():
                 for i, candidate in enumerate(candidate_list):
-                    del candidate['observations']
-                    candidate['actions'] = [env.FOLLOWER_MODEL_ACTIONS[ac] for ac in candidate['actions']]
+                    candidate['actions'] = candidate['actions']
                     candidate['scored_actions'] = list(zip(candidate['actions'], candidate['scores']))
                     candidate['instruction'] = envir.tokenizer.decode_sentence(candidate['instr_encoding'], break_on_eos=False, join=True)
                     del candidate['instr_encoding']
@@ -154,8 +155,8 @@ def validate_entry_point(args):
         else:
             output_file = None
         accuracies_by_weight, index_counts_by_weight = run_rational_follower(env, evaluator, follower, speaker, args.beam_size, include_gold=args.include_gold, output_file=output_file, compute_oracle=args.compute_oracle, mask_undo=args.mask_undo)
-        pprint.pprint(accuracies_by_weight)
-        pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
+        # pprint.pprint(accuracies_by_weight)
+        # pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
         print("max success_rate with weight: {}".format(weight))
         for metric,val in score_summary.items():

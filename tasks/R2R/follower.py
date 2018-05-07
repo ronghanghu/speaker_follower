@@ -599,7 +599,7 @@ class Seq2SeqAgent(BaseAgent):
                                                last_action=action_index,
                                                last_action_embedding=all_u_t[flat_index, action_index].detach(),
                                                action_count=inf_state.action_count + 1,
-                                               score=inf_state.score + action_score)
+                                               score=float(inf_state.score + action_score))
                             )
                 start_index = end_index
                 successors = sorted(successors, key=lambda t: t.score, reverse=True)[:beam_size]
