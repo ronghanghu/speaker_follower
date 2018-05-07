@@ -140,6 +140,40 @@ class SoftDotAttention(nn.Module):
         return h_tilde, attn
 
 
+class ContextOnlySoftDotAttention(nn.Module):
+    '''Like SoftDot, but don't concatenat h or perform the non-linearity transform
+    Ref: http://www.aclweb.org/anthology/D15-1166
+    Adapted from PyTorch OPEN NMT.
+    '''
+
+    def __init__(self, dim, context_dim=None):
+        '''Initialize layer.'''
+        super(ContextOnlySoftDotAttention, self).__init__()
+        if context_dim is None:
+            context_dim = dim
+        self.linear_in = nn.Linear(dim, context_dim, bias=False)
+        self.sm = nn.Softmax(dim=1)
+
+    def forward(self, h, context, mask=None):
+        '''Propagate h through the network.
+        h: batch x dim
+        context: batch x seq_len x dim
+        mask: batch x seq_len indices to be masked
+        '''
+        target = self.linear_in(h).unsqueeze(2)  # batch x dim x 1
+
+        # Get attention
+        attn = torch.bmm(context, target).squeeze(2)  # batch x seq_len
+        if mask is not None:
+            # -Inf masking prior to the softmax
+            attn.data.masked_fill_(mask, -float('inf'))
+        attn = self.sm(attn)
+        attn3 = attn.view(attn.size(0), 1, attn.size(1))  # batch x 1 x seq_len
+
+        weighted_context = torch.bmm(attn3, context).squeeze(1)  # batch x dim
+        return weighted_context, attn
+
+
 class FeedforwardImageAttention(nn.Module):
     def __init__(self, context_size, hidden_size, image_feature_size=2048):
         super(FeedforwardImageAttention, self).__init__()
@@ -382,7 +416,7 @@ class SpeakerEncoderLSTM(nn.Module):
 
 class SpeakerDecoderLSTM(nn.Module):
 
-    def __init__(self, vocab_size, vocab_embedding_size, hidden_size, dropout_ratio, glove=None):
+    def __init__(self, vocab_size, vocab_embedding_size, hidden_size, dropout_ratio, glove=None, use_input_att_feed=False):
         super(SpeakerDecoderLSTM, self).__init__()
         self.vocab_size = vocab_size
         self.vocab_embedding_size = vocab_embedding_size
@@ -394,8 +428,17 @@ class SpeakerDecoderLSTM(nn.Module):
             self.embedding.weight.data[...] = torch.from_numpy(glove)
             self.embedding.weight.requires_grad = False
         self.drop = nn.Dropout(p=dropout_ratio)
-        self.lstm = nn.LSTMCell(vocab_embedding_size, hidden_size)
-        self.attention_layer = SoftDotAttention(hidden_size)
+        self.use_input_att_feed = use_input_att_feed
+        if self.use_input_att_feed:
+            print('using input attention feed in SpeakerDecoderLSTM')
+            self.lstm = nn.LSTMCell(
+                vocab_embedding_size + hidden_size, hidden_size)
+            self.attention_layer = ContextOnlySoftDotAttention(hidden_size)
+            self.output_l1 = nn.Linear(hidden_size*2, hidden_size)
+            self.tanh = nn.Tanh()
+        else:
+            self.lstm = nn.LSTMCell(vocab_embedding_size, hidden_size)
+            self.attention_layer = SoftDotAttention(hidden_size)
         self.decoder2action = nn.Linear(hidden_size, vocab_size)
 
     def forward(self, previous_word, h_0, c_0, ctx, ctx_mask=None):
@@ -411,11 +454,23 @@ class SpeakerDecoderLSTM(nn.Module):
         word_embeds = self.embedding(previous_word)   # (batch, 1, embedding_size)
         word_embeds = word_embeds.squeeze()
         if not self.use_glove:
-            drop = self.drop(word_embeds)
+            word_embeds_drop = self.drop(word_embeds)
         else:
-            drop = word_embeds
-        h_1,c_1 = self.lstm(drop, (h_0,c_0))
-        h_1_drop = self.drop(h_1)
-        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
-        logit = self.decoder2action(h_tilde)
+            word_embeds_drop = word_embeds
+
+        if self.use_input_att_feed:
+            h_tilde, alpha = self.attention_layer(
+                self.drop(h_0), ctx, ctx_mask)
+            concat_input = torch.cat((word_embeds_drop, self.drop(h_tilde)), 1)
+            h_1,c_1 = self.lstm(concat_input, (h_0,c_0))
+            x = torch.cat((h_1, h_tilde), 1)
+            x = self.drop(x)
+            x = self.output_l1(x)
+            x = self.tanh(x)
+            logit = self.decoder2action(x)
+        else:
+            h_1,c_1 = self.lstm(word_embeds_drop, (h_0,c_0))
+            h_1_drop = self.drop(h_1)
+            h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
+            logit = self.decoder2action(h_tilde)
         return h_1,c_1,alpha,logit
