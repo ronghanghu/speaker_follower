@@ -207,17 +207,17 @@ class Seq2SeqSpeaker(object):
         return outputs
 
     def beam_search(self, beam_size, path_obs, path_actions):
-        raise NotImplementedError(
-            'speaker beam search has not been implemented yet')
 
         # TODO: here
         assert len(path_obs) == len(path_actions)
 
-        start_obs, batched_image_features, batched_actions, path_mask, path_lengths, _, perm_indices = self._batch_observations_and_actions(path_obs, path_actions, None)
+        start_obs, batched_image_features, batched_action_embeddings, path_mask, \
+            path_lengths, _, perm_indices = \
+            self._batch_observations_and_actions(path_obs, path_actions, None)
         batch_size = len(start_obs)
         assert len(perm_indices) == batch_size
 
-        ctx,h_t,c_t = self.encoder(batched_actions, batched_image_features, path_lengths)
+        ctx,h_t,c_t = self.encoder(batched_action_embeddings, batched_image_features)
 
         completed = []
         for _ in range(batch_size):
@@ -331,8 +331,8 @@ class Seq2SeqSpeaker(object):
 
         # We rely on env showing the entire batch before repeating anything
         looped = False
-        rollout_scores = []
-        beam_10_scores = []
+        # rollout_scores = []
+        # beam_10_scores = []
         while True:
             rollout_results = self.rollout()
             # if self.feedback == 'argmax':

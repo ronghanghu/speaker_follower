@@ -33,6 +33,7 @@ def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include
 
     looped = False
     while True:
+        print('loaded one batch')
         path_obs, path_actions, gold_encoded_instructions = speaker.env.gold_obs_actions_and_instructions(speaker.max_episode_len, load_next_minibatch=True)
         if include_gold:
             gold_candidates, gold_loss =  speaker._score_obs_actions_and_instructions(path_obs, path_actions, gold_encoded_instructions, 'teacher')
