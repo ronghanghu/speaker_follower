@@ -96,7 +96,7 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
     accuracies_by_weight = {}
     index_counts_by_weight = {}
 
-    for speaker_weight in [0.95]:  # Use 0.95 weight
+    for speaker_weight in [0., 0.95]:  # Use 0.95 weight
     # for speaker_weight in np.arange(0, 20 + 1) / 20.0:
         results = {}
         eval_results = []
@@ -177,8 +177,8 @@ def validate_entry_point(args):
             eval_file=eval_file, compute_oracle=args.compute_oracle,
             mask_undo=args.mask_undo,
             state_factored_search=args.state_factored_search)
-        # pprint.pprint(accuracies_by_weight)
-        # pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
+        pprint.pprint(accuracies_by_weight)
+        pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
         print("max success_rate with weight: {}".format(weight))
         for metric,val in score_summary.items():
