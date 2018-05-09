@@ -14,7 +14,7 @@ from collections import namedtuple, Counter
 
 #FollowerCandidate = namedtuple("FollowerCandidate", "instr_id, observations, actions, instr_encoding, follower_score, speaker_score")
 
-def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None, eval_file=None, compute_oracle=False, mask_undo=False):
+def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None, eval_file=None, compute_oracle=False, mask_undo=False, state_factored_search=False):
     follower.env = envir
     envir.reset_epoch()
 
@@ -30,7 +30,10 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
     candidate_lists_by_instr_id = {}
 
     looped = False
+    batch_idx = 0
     while True:
+        print('loaded batch %d' % batch_idx)
+        batch_idx += 1
         if include_gold:
             follower.feedback = 'teacher'
             gold_candidates = follower._rollout_with_loss()
@@ -38,7 +41,10 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
             gold_candidates = []
 
         follower.feedback = feedback_method
-        beam_candidates = follower.beam_search(beam_size, load_next_minibatch=not include_gold, mask_undo=mask_undo)
+        if state_factored_search:
+            beam_candidates = follower.state_factored_search(beam_size, 1, load_next_minibatch=not include_gold, mask_undo=mask_undo)
+        else:
+            beam_candidates = follower.beam_search(beam_size, load_next_minibatch=not include_gold, mask_undo=mask_undo)
 
         if include_gold:
             assert len(gold_candidates) == len(beam_candidates)
@@ -169,7 +175,8 @@ def validate_entry_point(args):
             env, evaluator, follower, speaker, args.beam_size,
             include_gold=args.include_gold, output_file=output_file,
             eval_file=eval_file, compute_oracle=args.compute_oracle,
-            mask_undo=args.mask_undo)
+            mask_undo=args.mask_undo,
+            state_factored_search=args.state_factored_search)
         # pprint.pprint(accuracies_by_weight)
         # pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
@@ -186,9 +193,9 @@ def make_arg_parser():
     parser.add_argument("--include_gold", action='store_true')
     parser.add_argument("--output_file")
     parser.add_argument("--eval_file")
-    parser.add_argument("--use_test_set", action='store_true')
     parser.add_argument("--compute_oracle", action='store_true')
     parser.add_argument("--mask_undo", action='store_true')
+    parser.add_argument("--state_factored_search", action='store_true')
     return parser
 
 if __name__ == "__main__":

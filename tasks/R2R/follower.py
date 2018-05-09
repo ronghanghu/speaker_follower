@@ -16,7 +16,7 @@ from utils import vocab_pad_idx, vocab_eos_idx, flatten, structured_map, try_cud
 
 #from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, LEFT_ACTION_INDEX, RIGHT_ACTION_INDEX, START_ACTION_INDEX, END_ACTION_INDEX, FORWARD_ACTION_INDEX, index_action_tuple
 
-InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, last_action_embedding, action_count, score")
+InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, last_action_embedding, action_count, score, h_t, c_t")
 
 def backchain_inference_states(last_inference_state):
     states = []
@@ -526,7 +526,7 @@ class Seq2SeqAgent(BaseAgent):
                             last_action=-1,
                             last_action_embedding=self.decoder.u_begin.view(-1),
                             action_count=0,
-                            score=0.0)]
+                            score=0.0, h_t=None, c_t=None)]
             for i, (ws, o) in enumerate(zip(world_states, obs))
         ]
 
@@ -597,7 +597,7 @@ class Seq2SeqAgent(BaseAgent):
                                                last_action=action_index,
                                                last_action_embedding=all_u_t[flat_index, action_index].detach(),
                                                action_count=inf_state.action_count + 1,
-                                               score=float(inf_state.score + action_score))
+                                               score=float(inf_state.score + action_score), h_t=None, c_t=None)
                             )
                 start_index = end_index
                 successors = sorted(successors, key=lambda t: t.score, reverse=True)[:beam_size]
@@ -660,6 +660,230 @@ class Seq2SeqAgent(BaseAgent):
             assert this_completed
             this_trajs = []
             for inf_state in sorted(this_completed, key=lambda t: t.score, reverse=True)[:beam_size]:
+                path_states, path_observations, path_actions, path_scores = backchain_inference_states(inf_state)
+                # this will have messed-up headings for (at least some) starting locations because of
+                # discretization, so read from the observations instead
+                ## path = [(obs.viewpointId, state.heading, state.elevation)
+                ##         for state in path_states]
+                trajectory = [path_element_from_observation(ob) for ob in path_observations]
+                this_trajs.append({
+                    'instr_id': path_observations[0]['instr_id'],
+                    'instr_encoding': path_observations[0]['instr_encoding'],
+                    'trajectory': trajectory,
+                    'observations': path_observations,
+                    'actions': path_actions,
+                    'score': inf_state.score,
+                    'scores': path_scores,
+                })
+            trajs.append(this_trajs)
+        return trajs
+
+    def state_factored_search(self, completion_size, successor_size, load_next_minibatch=True, mask_undo=False):
+        assert self.env.beam_size >= successor_size
+        world_states = self.env.reset(sort=True, beamed=True, load_next_minibatch=load_next_minibatch)
+        initial_obs = self.env.observe(world_states, beamed=True)
+        batch_size = len(world_states)
+
+        # get mask and lengths
+        seq, seq_mask, seq_lengths = self._proc_batch(initial_obs, beamed=True)
+
+        # Forward through encoder, giving initial hidden state and memory cell for decoder
+        ctx,h_t,c_t = self.encoder(seq, seq_lengths)
+
+        completed = []
+        completed_holding = []
+        for _ in range(batch_size):
+            completed.append({})
+            completed_holding.append({})
+
+        state_cache = [
+            {ws[0]: (InferenceState(prev_inference_state=None,
+                                    world_state=ws[0],
+                                    observation=o[0],
+                                    flat_index=None,
+                                    last_action=-1,
+                                    last_action_embedding=self.decoder.u_begin.view(-1),
+                                    action_count=0,
+                                    score=0.0, h_t=h_t[i], c_t=c_t[i]), True)}
+            for i, (ws, o) in enumerate(zip(world_states, initial_obs))
+        ]
+
+        beams = [[inf_state for world_state, (inf_state, expanded) in sorted(instance_cache.items())]
+                 for instance_cache in state_cache] # sorting is a noop here since each instance_cache should only contain one
+
+        # Do a sequence rollout and calculate the loss
+        while any(len(comp) < completion_size for comp in completed):
+            beam_indices = []
+            u_t_list = []
+            h_t_list = []
+            c_t_list = []
+            flat_obs = []
+            for beam_index, beam in enumerate(beams):
+                for inf_state in beam:
+                    beam_indices.append(beam_index)
+                    u_t_list.append(inf_state.last_action_embedding)
+                    h_t_list.append(inf_state.h_t.unsqueeze(0))
+                    c_t_list.append(inf_state.c_t.unsqueeze(0))
+                    flat_obs.append(inf_state.observation)
+
+            u_t_prev = torch.stack(u_t_list, dim=0)
+            assert len(u_t_prev.shape) == 2
+            f_t_list = self._feature_variables(flat_obs) # Image features from obs
+            all_u_t, is_valid, is_valid_numpy = self._action_variable(flat_obs)
+            h_t = torch.cat(h_t_list, dim=0)
+            c_t = torch.cat(c_t_list, dim=0)
+
+            assert len(f_t_list) == 1, 'for now, only work with MeanPooled feature'
+            h_t, c_t, alpha, logit, alpha_v = self.decoder(
+                u_t_prev, all_u_t, f_t_list[0], h_t, c_t, ctx[beam_indices], seq_mask[beam_indices])
+
+            # Mask outputs of invalid actions
+            logit[is_valid == 0] = -float('inf')
+            # # Mask outputs where agent can't move forward
+            # no_forward_mask = [len(ob['navigableLocations']) <= 1 for ob in flat_obs]
+
+            if mask_undo:
+                masked_logit = logit.clone()
+            else:
+                masked_logit = logit
+
+            log_probs = F.log_softmax(logit, dim=1).data
+
+            # force ending if we've reached the max time steps
+            # if t == self.episode_len - 1:
+            #     action_scores = log_probs[:,self.end_index].unsqueeze(-1)
+            #     action_indices = torch.from_numpy(np.full((log_probs.size()[0], 1), self.end_index))
+            # else:
+            #_, action_indices = masked_logit.data.topk(min(successor_size, logit.size()[1]), dim=1)
+            _, action_indices = masked_logit.data.topk(logit.size()[1], dim=1) # todo: fix this
+            action_scores = log_probs.gather(1, action_indices)
+            assert action_scores.size() == action_indices.size()
+
+            start_index = 0
+            assert len(beams) == len(world_states)
+            all_successors = []
+            for beam_index, (beam, beam_world_states) in enumerate(zip(beams, world_states)):
+                successors = []
+                end_index = start_index + len(beam)
+                assert len(beam_world_states) == len(beam)
+                if beam:
+                    for inf_index, (inf_state, world_state, action_score_row) in \
+                            enumerate(zip(beam, beam_world_states, log_probs[start_index:end_index])):
+                        flat_index = start_index + inf_index
+                        for action_index, action_score in enumerate(action_score_row):
+                            if is_valid_numpy[flat_index, action_index] == 0:
+                                continue
+                            successors.append(
+                                InferenceState(prev_inference_state=inf_state,
+                                               world_state=world_state, # will be updated later after successors are pruned
+                                               observation=flat_obs[flat_index], # will be updated later after successors are pruned
+                                               flat_index=None,
+                                               last_action=action_index,
+                                               last_action_embedding=all_u_t[flat_index, action_index].detach(),
+                                               action_count=inf_state.action_count + 1,
+                                               score=inf_state.score + action_score, h_t=h_t[flat_index], c_t=c_t[flat_index])
+                            )
+                start_index = end_index
+                successors = sorted(successors, key=lambda t: t.score, reverse=True)
+                all_successors.append(successors)
+
+            successor_world_states = [
+                [inf_state.world_state for inf_state in successors]
+                for successors in all_successors
+            ]
+
+            successor_env_actions = [
+                [inf_state.last_action for inf_state in successors]
+                for successors in all_successors
+            ]
+
+            successor_last_obs = [
+                [inf_state.observation for inf_state in successors]
+                for successors in all_successors
+            ]
+
+            successor_world_states = self.env.step(successor_world_states, successor_env_actions, successor_last_obs, beamed=True)
+
+            all_successors = structured_map(lambda inf_state, world_state: inf_state._replace(world_state=world_state),
+                                            all_successors, successor_world_states, nested=True)
+
+            # if all_successors[0]:
+            #     print("t: %s\tstate: %s\taction: %s\tscore: %s" % (t, all_successors[0][0].world_state, all_successors[0][0].last_action, all_successors[0][0].score))
+
+            assert len(all_successors) == len(state_cache)
+
+            new_beams = []
+
+            for beam_index, (successors, instance_cache) in enumerate(zip(all_successors, state_cache)):
+                # early stop if we've already built a sizable completion list
+                instance_completed = completed[beam_index]
+                instance_completed_holding = completed_holding[beam_index]
+                if len(instance_completed) >= completion_size:
+                    new_beams.append([])
+                    continue
+                for successor in successors:
+                    ws = successor.world_state
+                    if successor.last_action == 0 or successor.action_count == self.episode_len:
+                        if ws not in instance_completed_holding or instance_completed_holding[ws][0].score < successor.score:
+                            instance_completed_holding[ws] = (successor, False)
+                    else:
+                        if ws not in instance_cache or instance_cache[ws][0].score < successor.score:
+                            instance_cache[ws] = (successor, False)
+
+                # third value: did this come from completed_holding?
+                uncompleted_to_consider = ((ws, inf_state, False) for (ws, (inf_state, expanded)) in instance_cache.items() if not expanded)
+                completed_to_consider = ((ws, inf_state, True) for (ws, (inf_state, expanded)) in instance_completed_holding.items() if not expanded)
+                import itertools
+                import heapq
+                to_consider = itertools.chain(uncompleted_to_consider, completed_to_consider)
+                ws_and_inf_states = heapq.nlargest(successor_size, to_consider, key=lambda pair: pair[1].score)
+
+                new_beam = []
+                for ws, inf_state, is_completed in ws_and_inf_states:
+                    if is_completed:
+                        assert instance_completed_holding[ws] == (inf_state, False)
+                        instance_completed_holding[ws] = (inf_state, True)
+                        if ws not in instance_completed or instance_completed[ws].score < inf_state.score:
+                            instance_completed[ws] = inf_state
+                    else:
+                        instance_cache[ws] = (inf_state, True)
+                        new_beam.append(inf_state)
+
+                if len(instance_completed) >= completion_size:
+                    new_beams.append([])
+                else:
+                    new_beams.append(new_beam)
+
+            beams = new_beams
+
+            # Early exit if all ended
+            if not any(beam for beam in beams):
+                break
+
+            world_states = [
+                [inf_state.world_state for inf_state in beam]
+                for beam in beams
+            ]
+            successor_obs = self.env.observe(world_states, beamed=True)
+            beams = structured_map(lambda inf_state, obs: inf_state._replace(observation=obs),
+                                   beams, successor_obs, nested=True)
+
+        completed_list = []
+        for this_completed in completed:
+            completed_list.append(sorted(this_completed.values(), key=lambda t: t.score, reverse=True)[:completion_size])
+        completed_ws = [
+            [inf_state.world_state for inf_state in comp_l]
+            for comp_l in completed_list
+        ]
+        completed_obs = self.env.observe(completed_ws, beamed=True)
+        completed_list = structured_map(lambda inf_state, obs: inf_state._replace(observation=obs),
+                                        completed_list, completed_obs, nested=True)
+
+        trajs = []
+        for this_completed in completed_list:
+            assert this_completed
+            this_trajs = []
+            for inf_state in this_completed:
                 path_states, path_observations, path_actions, path_scores = backchain_inference_states(inf_state)
                 # this will have messed-up headings for (at least some) starting locations because of
                 # discretization, so read from the observations instead
