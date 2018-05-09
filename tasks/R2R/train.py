@@ -57,6 +57,11 @@ def eval_model(agent, results_path, use_dropout, feedback, allow_cheat=False):
     agent.results_path = results_path
     agent.test(use_dropout=use_dropout, feedback=feedback, allow_cheat=allow_cheat)
 
+
+def filter_param(param_list):
+    return [p for p in param_list if p.requires_grad]
+
+
 def train(args, train_env, agent, log_every=log_every, val_envs=None):
     ''' Train on training set, validating on both seen and unseen. '''
 
@@ -64,8 +69,8 @@ def train(args, train_env, agent, log_every=log_every, val_envs=None):
         val_envs = {}
 
     print('Training with %s feedback' % args.feedback_method)
-    encoder_optimizer = optim.Adam(agent.encoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    decoder_optimizer = optim.Adam(agent.decoder.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    encoder_optimizer = optim.Adam(filter_param(agent.encoder.parameters()), lr=learning_rate, weight_decay=weight_decay)
+    decoder_optimizer = optim.Adam(filter_param(agent.decoder.parameters()), lr=learning_rate, weight_decay=weight_decay)
 
     data_log = defaultdict(list)
     start = time.time()
@@ -159,8 +164,9 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits, batch
     train_env = R2RBatch(image_features_list, batch_size=batch_size, splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if args.bidirectional else hidden_size
+    glove = np.load('tasks/R2R/data/train_glove.npy')
     encoder = try_cuda(EncoderLSTM(len(vocab), word_embedding_size, enc_hidden_size, vocab_pad_idx,
-                                   dropout_ratio, bidirectional=args.bidirectional))
+                                   dropout_ratio, bidirectional=args.bidirectional, glove=glove))
     # image_attention_layers = make_image_attention_layers(args, image_features_list, hidden_size)
     # feature_size = 0
     # assert len(image_attention_layers) == len(image_features_list)
@@ -226,8 +232,8 @@ def make_arg_parser():
     parser.add_argument("--bidirectional", action='store_true')
     parser.add_argument("--n_iters", type=int, default=20000)
     parser.add_argument("--no_save", action='store_true')
-
     parser.add_argument("--use_train_subset", action='store_true', help="use a subset of the original train data as val_seen and val_unseen")
+    parser.add_argument("--use_test_set", action='store_true')
     return parser
 
 if __name__ == "__main__":
