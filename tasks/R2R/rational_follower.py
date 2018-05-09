@@ -14,7 +14,7 @@ from collections import namedtuple, Counter
 
 #FollowerCandidate = namedtuple("FollowerCandidate", "instr_id, observations, actions, instr_encoding, follower_score, speaker_score")
 
-def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None, compute_oracle=False, mask_undo=False):
+def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None, eval_file=None, compute_oracle=False, mask_undo=False):
     follower.env = envir
     envir.reset_epoch()
 
@@ -93,6 +93,7 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
     for speaker_weight in [0.95]:  # Use 0.95 weight
     # for speaker_weight in np.arange(0, 20 + 1) / 20.0:
         results = {}
+        eval_results = []
         index_count = Counter()
 
         speaker_scaled_weight = speaker_weight / speaker_std
@@ -102,11 +103,17 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
             best_ix, best_cand = max(enumerate(candidates), key=lambda tp: tp[1]['speaker_score'] * speaker_scaled_weight + tp[1]['follower_score'] * follower_scaled_weight)
             results[instr_id] = best_cand
             index_count[best_ix] += 1
+            eval_results.append(
+                {'instr_id': instr_id, 'trajectory': best_cand['trajectory']})
 
         score_summary, _ = evaluator.score_results(results)
 
         accuracies_by_weight[speaker_weight] = score_summary
         index_counts_by_weight[speaker_weight] = index_count
+
+    if eval_file:
+        with open(eval_file % speaker_weight, 'w') as f:
+            utils.pretty_json_dump(eval_results, f)
 
     if compute_oracle:
         oracle_results = {}
@@ -154,7 +161,15 @@ def validate_entry_point(args):
             output_file = "{}_{}.json".format(args.output_file, env_name)
         else:
             output_file = None
-        accuracies_by_weight, index_counts_by_weight = run_rational_follower(env, evaluator, follower, speaker, args.beam_size, include_gold=args.include_gold, output_file=output_file, compute_oracle=args.compute_oracle, mask_undo=args.mask_undo)
+        if args.eval_file:
+            eval_file = "{}_{}_sw_%.2f.json".format(args.eval_file, env_name)
+        else:
+            eval_file = None
+        accuracies_by_weight, index_counts_by_weight = run_rational_follower(
+            env, evaluator, follower, speaker, args.beam_size,
+            include_gold=args.include_gold, output_file=output_file,
+            eval_file=eval_file, compute_oracle=args.compute_oracle,
+            mask_undo=args.mask_undo)
         # pprint.pprint(accuracies_by_weight)
         # pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
@@ -170,6 +185,8 @@ def make_arg_parser():
     parser.add_argument("--batch_size", type=int, default=30)
     parser.add_argument("--include_gold", action='store_true')
     parser.add_argument("--output_file")
+    parser.add_argument("--eval_file")
+    parser.add_argument("--use_test_set", action='store_true')
     parser.add_argument("--compute_oracle", action='store_true')
     parser.add_argument("--mask_undo", action='store_true')
     return parser

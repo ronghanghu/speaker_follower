@@ -181,6 +181,8 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits, batch
 def train_setup(args, batch_size=BATCH_SIZE):
     train_splits = ['train']
     val_splits = ['train_subset', 'val_seen', 'val_unseen']
+    if args.use_test_set:
+        val_splits.append('test')
 
     vocab = TRAIN_VOCAB
 
