@@ -14,7 +14,7 @@ from collections import namedtuple, Counter
 
 SpeakerCandidate = namedtuple("SpeakerCandidate", "instr_id, observations, actions, instr_encoding, follower_score, speaker_score")
 
-def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include_gold=False, output_file=None):
+def generate_and_score_candidates(envir, speaker, follower, n_candidates, include_gold=False):
     follower.env = envir
     speaker.env = envir
     envir.reset_epoch()
@@ -31,6 +31,7 @@ def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include
 
     candidate_lists_by_instr_id = {}
 
+    num_candidates_per_instance = []
     looped = False
     batch_idx = 0
     while True:
@@ -42,7 +43,7 @@ def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include
         else:
             gold_candidates = []
 
-        beam_candidates = speaker.beam_search(beam_size, path_obs, path_actions)
+        beam_candidates = speaker.beam_search(n_candidates, path_obs, path_actions)
 
         if include_gold:
             assert len(gold_candidates) == len(beam_candidates)
@@ -55,6 +56,7 @@ def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include
         cand_obs = []
         cand_actions = []
         for beam_index, this_beam in enumerate(beam_candidates):
+            num_candidates_per_instance.append(len(this_beam))
             for candidate in this_beam:
                 cand_obs.append(path_obs[beam_index])
                 cand_actions.append(path_actions[beam_index])
@@ -85,6 +87,12 @@ def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include
         if looped:
             break
 
+    print("average distinct candidates per instance: {}".format(np.mean(num_candidates_per_instance)))
+
+    return candidate_lists_by_instr_id
+
+
+def predict_from_candidates(candidate_lists_by_instr_id, speaker_weights):
     speaker_scores = [cand['speaker_score']
                        for lst in candidate_lists_by_instr_id.values()
                        for cand in lst]
@@ -96,7 +104,6 @@ def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include
     follower_std = np.std(follower_scores)
 
     results_by_weight = {}
-    index_counts_by_weight = {}
 
     for speaker_weight in np.arange(0, 20 + 1) / 20.0:
         results = {}
@@ -110,10 +117,21 @@ def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include
             results[instr_id] = best_cand
             index_count[best_ix] += 1
 
-        score_summary, _ = evaluator.score_results(results)
+        results_by_weight[speaker_weight] = results
 
-        results_by_weight[speaker_weight] = score_summary
-        index_counts_by_weight[speaker_weight] = index_count
+    return results_by_weight
+
+
+def run_rational_speaker(envir, speaker_evaluator, speaker, follower, n_candidates, include_gold=False, output_file=None):
+    candidate_lists_by_instr_id = generate_and_score_candidates(envir, speaker, follower, n_candidates)
+
+    speaker_weights = np.arange(0, 20 + 1) / 20.0
+    results_by_weight = predict_from_candidates(candidate_lists_by_instr_id, speaker_weights)
+
+    scores_by_weight = {}
+    for speaker_weight, results in results_by_weight.items():
+        score_summary, _ = speaker_evaluator.score_results(results)
+        scores_by_weight[speaker_weight] = score_summary
 
     if output_file:
         with open(output_file, 'w') as f:
@@ -125,7 +143,7 @@ def run_rational_speaker(envir, evaluator, speaker, follower, beam_size, include
                     candidate['gold'] = (include_gold and i == 0)
             utils.pretty_json_dump(candidate_lists_by_instr_id, f)
 
-    return results_by_weight, index_counts_by_weight
+    return scores_by_weight, results_by_weight
 
 def validate_entry_point(args):
     follower, follower_train_env, follower_val_envs = train.train_setup(args, args.batch_size)
@@ -142,7 +160,7 @@ def validate_entry_point(args):
             output_file = "{}_{}.json".format(args.output_file, env_name)
         else:
             output_file = None
-        results_by_weight, index_counts_by_weight = run_rational_speaker(
+        scores_by_weight, _ = run_rational_speaker(
             env,
             evaluator,
             speaker,
@@ -151,9 +169,8 @@ def validate_entry_point(args):
             include_gold=args.include_gold,
             output_file=output_file
         )
-        pprint.pprint(results_by_weight)
-        pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
-        weight, score_summary = max(results_by_weight.items(), key=lambda pair: pair[1]['bleu'])
+        pprint.pprint(scores_by_weight)
+        weight, score_summary = max(scores_by_weight.items(), key=lambda pair: pair[1]['bleu'])
         print("max success_rate with weight: {}".format(weight))
         for metric,val in score_summary.items():
             print("{} {}\t{}".format(env_name, metric, val))
