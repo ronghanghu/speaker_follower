@@ -121,9 +121,9 @@ def run_rational_follower(
         accuracies_by_weight[speaker_weight] = score_summary
         index_counts_by_weight[speaker_weight] = index_count
 
-    if eval_file:
-        with open(eval_file % speaker_weight, 'w') as f:
-            utils.pretty_json_dump(eval_results, f)
+        if eval_file:
+            with open(eval_file % speaker_weight, 'w') as f:
+                utils.pretty_json_dump(eval_results, f)
 
     if compute_oracle:
         oracle_results = {}
