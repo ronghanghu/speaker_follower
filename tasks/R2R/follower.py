@@ -678,7 +678,7 @@ class Seq2SeqAgent(BaseAgent):
             trajs.append(this_trajs)
         return trajs
 
-    def state_factored_search(self, completion_size, successor_size, load_next_minibatch=True, mask_undo=False):
+    def state_factored_search(self, completion_size, successor_size, load_next_minibatch=True, mask_undo=False, first_n_ws_key=4):
         assert self.env.beam_size >= successor_size
         world_states = self.env.reset(sort=True, beamed=True, load_next_minibatch=load_next_minibatch)
         initial_obs = self.env.observe(world_states, beamed=True)
@@ -697,7 +697,7 @@ class Seq2SeqAgent(BaseAgent):
             completed_holding.append({})
 
         state_cache = [
-            {ws[0]: (InferenceState(prev_inference_state=None,
+            {ws[0][0:first_n_ws_key]: (InferenceState(prev_inference_state=None,
                                     world_state=ws[0],
                                     observation=o[0],
                                     flat_index=None,
@@ -822,31 +822,31 @@ class Seq2SeqAgent(BaseAgent):
                     new_beams.append([])
                     continue
                 for successor in successors:
-                    ws = successor.world_state
+                    ws_keys = successor.world_state[0:first_n_ws_key]
                     if successor.last_action == 0 or successor.action_count == self.episode_len:
-                        if ws not in instance_completed_holding or instance_completed_holding[ws][0].score < successor.score:
-                            instance_completed_holding[ws] = (successor, False)
+                        if ws_keys not in instance_completed_holding or instance_completed_holding[ws_keys][0].score < successor.score:
+                            instance_completed_holding[ws_keys] = (successor, False)
                     else:
-                        if ws not in instance_cache or instance_cache[ws][0].score < successor.score:
-                            instance_cache[ws] = (successor, False)
+                        if ws_keys not in instance_cache or instance_cache[ws_keys][0].score < successor.score:
+                            instance_cache[ws_keys] = (successor, False)
 
                 # third value: did this come from completed_holding?
-                uncompleted_to_consider = ((ws, inf_state, False) for (ws, (inf_state, expanded)) in instance_cache.items() if not expanded)
-                completed_to_consider = ((ws, inf_state, True) for (ws, (inf_state, expanded)) in instance_completed_holding.items() if not expanded)
+                uncompleted_to_consider = ((ws_keys, inf_state, False) for (ws_keys, (inf_state, expanded)) in instance_cache.items() if not expanded)
+                completed_to_consider = ((ws_keys, inf_state, True) for (ws_keys, (inf_state, expanded)) in instance_completed_holding.items() if not expanded)
                 import itertools
                 import heapq
                 to_consider = itertools.chain(uncompleted_to_consider, completed_to_consider)
-                ws_and_inf_states = heapq.nlargest(successor_size, to_consider, key=lambda pair: pair[1].score)
+                ws_keys_and_inf_states = heapq.nlargest(successor_size, to_consider, key=lambda pair: pair[1].score)
 
                 new_beam = []
-                for ws, inf_state, is_completed in ws_and_inf_states:
+                for ws_keys, inf_state, is_completed in ws_keys_and_inf_states:
                     if is_completed:
-                        assert instance_completed_holding[ws] == (inf_state, False)
-                        instance_completed_holding[ws] = (inf_state, True)
-                        if ws not in instance_completed or instance_completed[ws].score < inf_state.score:
-                            instance_completed[ws] = inf_state
+                        assert instance_completed_holding[ws_keys] == (inf_state, False)
+                        instance_completed_holding[ws_keys] = (inf_state, True)
+                        if ws_keys not in instance_completed or instance_completed[ws_keys].score < inf_state.score:
+                            instance_completed[ws_keys] = inf_state
                     else:
-                        instance_cache[ws] = (inf_state, True)
+                        instance_cache[ws_keys] = (inf_state, True)
                         new_beam.append(inf_state)
 
                 if len(instance_completed) >= completion_size:

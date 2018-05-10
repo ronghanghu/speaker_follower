@@ -14,7 +14,11 @@ from collections import namedtuple, Counter
 
 #FollowerCandidate = namedtuple("FollowerCandidate", "instr_id, observations, actions, instr_encoding, follower_score, speaker_score")
 
-def run_rational_follower(envir, evaluator, follower, speaker, beam_size, include_gold=False, output_file=None, eval_file=None, compute_oracle=False, mask_undo=False, state_factored_search=False):
+def run_rational_follower(
+        envir, evaluator, follower, speaker, beam_size,
+        include_gold=False, output_file=None, eval_file=None,
+        compute_oracle=False, mask_undo=False, state_factored_search=False,
+        state_first_n_ws_key=4):
     follower.env = envir
     envir.reset_epoch()
 
@@ -42,7 +46,7 @@ def run_rational_follower(envir, evaluator, follower, speaker, beam_size, includ
 
         follower.feedback = feedback_method
         if state_factored_search:
-            beam_candidates = follower.state_factored_search(beam_size, 1, load_next_minibatch=not include_gold, mask_undo=mask_undo)
+            beam_candidates = follower.state_factored_search(beam_size, 1, load_next_minibatch=not include_gold, mask_undo=mask_undo, first_n_ws_key=state_first_n_ws_key)
         else:
             beam_candidates = follower.beam_search(beam_size, load_next_minibatch=not include_gold, mask_undo=mask_undo)
 
@@ -176,7 +180,8 @@ def validate_entry_point(args):
             include_gold=args.include_gold, output_file=output_file,
             eval_file=eval_file, compute_oracle=args.compute_oracle,
             mask_undo=args.mask_undo,
-            state_factored_search=args.state_factored_search)
+            state_factored_search=args.state_factored_search,
+            state_first_n_ws_key=args.state_first_n_ws_key)
         pprint.pprint(accuracies_by_weight)
         pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
@@ -196,6 +201,8 @@ def make_arg_parser():
     parser.add_argument("--compute_oracle", action='store_true')
     parser.add_argument("--mask_undo", action='store_true')
     parser.add_argument("--state_factored_search", action='store_true')
+    parser.add_argument("--state_first_n_ws_key", type=int, default=4)
+
     return parser
 
 if __name__ == "__main__":
