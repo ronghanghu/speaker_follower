@@ -148,6 +148,8 @@ def run_rational_follower(
                     candidate['actions'] = candidate['actions']
                     candidate['scored_actions'] = list(zip(candidate['actions'], candidate['scores']))
                     candidate['instruction'] = envir.tokenizer.decode_sentence(candidate['instr_encoding'], break_on_eos=False, join=True)
+                    if 'attentions' in candidate:
+                        candidate['attentions'] = [list(tens) for tens in candidate['attentions']]
                     del candidate['instr_encoding']
                     del candidate['trajectory']
                     candidate['rank'] = i

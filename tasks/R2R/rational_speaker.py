@@ -76,6 +76,8 @@ def generate_and_score_candidates(envir, speaker, follower, n_candidates, includ
                 candidate['speaker_score'] = candidate['score']
                 candidate['follower_score'] = follower_scored_candidate['score']
                 candidate['actions'] = follower_scored_candidate['actions']
+                if 'attentions' in candidate:
+                    candidate['attentions'] = [list(tens) for tens in candidate['attentions']]
                 assert np.allclose(np.sum(follower_scored_candidate['scores']), follower_scored_candidate['score'])
             start_index += len(instance_candidates)
             assert utils.all_equal([i['instr_id'] for i in instance_candidates])

@@ -13,21 +13,23 @@ import torch.distributions as D
 from utils import vocab_pad_idx, vocab_bos_idx, vocab_eos_idx, flatten, try_cuda
 from follower import batch_instructions_from_encoded
 
-InferenceState = namedtuple("InferenceState", "prev_inference_state, flat_index, last_word, word_count, score")
+InferenceState = namedtuple("InferenceState", "prev_inference_state, flat_index, last_word, word_count, score, last_alpha")
 
 def backchain_inference_states(last_inference_state):
     word_indices = []
     inf_state = last_inference_state
     scores = []
     last_score = None
+    attentions = []
     while inf_state is not None:
         word_indices.append(inf_state.last_word)
+        attentions.append(inf_state.last_alpha)
         if last_score is not None:
             scores.append(last_score - inf_state.score)
         last_score = inf_state.score
         inf_state = inf_state.prev_inference_state
     scores.append(last_score)
-    return list(reversed(word_indices))[1:], list(reversed(scores))[1:] # exclude BOS
+    return list(reversed(word_indices))[1:], list(reversed(scores))[1:], list(reversed(attentions))[1:] # exclude BOS
 
 class Seq2SeqSpeaker(object):
     feedback_options = ['teacher', 'argmax', 'sample']
@@ -228,7 +230,8 @@ class Seq2SeqSpeaker(object):
                             flat_index=i,
                             last_word=vocab_bos_idx,
                             word_count=0,
-                            score=0.0)]
+                            score=0.0,
+                            last_alpha=None)]
             for i in range(batch_size)
         ]
 
@@ -269,7 +272,8 @@ class Seq2SeqSpeaker(object):
                                     flat_index=flat_index,
                                     last_word=word_index,
                                     word_count=inf_state.word_count + 1,
-                                    score=inf_state.score + word_score)
+                                    score=inf_state.score + word_score,
+                                    last_alpha=alpha[flat_index].data)
                             )
                 start_index = end_index
                 successors = sorted(successors, key=lambda t: t.score, reverse=True)[:beam_size]
@@ -302,13 +306,14 @@ class Seq2SeqSpeaker(object):
             this_completed = completed[perm_index]
             instr_id = start_obs[perm_index]['instr_id']
             for inf_state in sorted(this_completed, key=lambda t: t.score, reverse=True)[:beam_size]:
-                word_indices, scores = backchain_inference_states(inf_state)
+                word_indices, scores, attentions = backchain_inference_states(inf_state)
                 this_outputs.append({
                     'instr_id': instr_id,
                     'word_indices': word_indices,
                     'score': inf_state.score,
                     'scores': scores,
-                    'words': self.env.tokenizer.decode_sentence(word_indices, break_on_eos=True, join=False)
+                    'words': self.env.tokenizer.decode_sentence(word_indices, break_on_eos=True, join=False),
+                    'attentions': attentions,
                 })
         return outputs
 

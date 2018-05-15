@@ -16,7 +16,7 @@ from utils import vocab_pad_idx, vocab_eos_idx, flatten, structured_map, try_cud
 
 #from env import FOLLOWER_MODEL_ACTIONS, FOLLOWER_ENV_ACTIONS, IGNORE_ACTION_INDEX, LEFT_ACTION_INDEX, RIGHT_ACTION_INDEX, START_ACTION_INDEX, END_ACTION_INDEX, FORWARD_ACTION_INDEX, index_action_tuple
 
-InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, last_action_embedding, action_count, score, h_t, c_t")
+InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, last_action_embedding, action_count, score, h_t, c_t, last_alpha")
 
 def backchain_inference_states(last_inference_state):
     states = []
@@ -25,16 +25,18 @@ def backchain_inference_states(last_inference_state):
     inf_state = last_inference_state
     scores = []
     last_score = None
+    attentions = []
     while inf_state is not None:
         states.append(inf_state.world_state)
         observations.append(inf_state.observation)
         actions.append(inf_state.last_action)
+        attentions.append(inf_state.last_alpha)
         if last_score is not None:
             scores.append(last_score - inf_state.score)
         last_score = inf_state.score
         inf_state = inf_state.prev_inference_state
     scores.append(last_score)
-    return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:], list(reversed(scores))[1:] # exclude start action
+    return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:], list(reversed(scores))[1:], list(reversed(attentions))[1:] # exclude start action
 
 def batch_instructions_from_encoded(encoded_instructions, max_length, reverse=False, sort=False):
     # encoded_instructions: list of lists of token indices (should not be padded, or contain BOS or EOS tokens)
@@ -526,7 +528,7 @@ class Seq2SeqAgent(BaseAgent):
                             last_action=-1,
                             last_action_embedding=self.decoder.u_begin.view(-1),
                             action_count=0,
-                            score=0.0, h_t=None, c_t=None)]
+                            score=0.0, h_t=None, c_t=None, last_alpha=None)]
             for i, (ws, o) in enumerate(zip(world_states, obs))
         ]
 
@@ -597,7 +599,8 @@ class Seq2SeqAgent(BaseAgent):
                                                last_action=action_index,
                                                last_action_embedding=all_u_t[flat_index, action_index].detach(),
                                                action_count=inf_state.action_count + 1,
-                                               score=float(inf_state.score + action_score), h_t=None, c_t=None)
+                                               score=float(inf_state.score + action_score), h_t=None, c_t=None,
+                                               last_alpha=alpha[flat_index].data)
                             )
                 start_index = end_index
                 successors = sorted(successors, key=lambda t: t.score, reverse=True)[:beam_size]
@@ -660,7 +663,7 @@ class Seq2SeqAgent(BaseAgent):
             assert this_completed
             this_trajs = []
             for inf_state in sorted(this_completed, key=lambda t: t.score, reverse=True)[:beam_size]:
-                path_states, path_observations, path_actions, path_scores = backchain_inference_states(inf_state)
+                path_states, path_observations, path_actions, path_scores, path_attentions = backchain_inference_states(inf_state)
                 # this will have messed-up headings for (at least some) starting locations because of
                 # discretization, so read from the observations instead
                 ## path = [(obs.viewpointId, state.heading, state.elevation)
@@ -674,6 +677,7 @@ class Seq2SeqAgent(BaseAgent):
                     'actions': path_actions,
                     'score': inf_state.score,
                     'scores': path_scores,
+                    'attentions': path_attentions
                 })
             trajs.append(this_trajs)
         return trajs
@@ -704,7 +708,7 @@ class Seq2SeqAgent(BaseAgent):
                                     last_action=-1,
                                     last_action_embedding=self.decoder.u_begin.view(-1),
                                     action_count=0,
-                                    score=0.0, h_t=h_t[i], c_t=c_t[i]), True)}
+                                    score=0.0, h_t=h_t[i], c_t=c_t[i], last_alpha=None), True)}
             for i, (ws, o) in enumerate(zip(world_states, initial_obs))
         ]
 
@@ -781,7 +785,9 @@ class Seq2SeqAgent(BaseAgent):
                                                last_action=action_index,
                                                last_action_embedding=all_u_t[flat_index, action_index].detach(),
                                                action_count=inf_state.action_count + 1,
-                                               score=inf_state.score + action_score, h_t=h_t[flat_index], c_t=c_t[flat_index])
+                                               score=inf_state.score + action_score,
+                                               h_t=h_t[flat_index], c_t=c_t[flat_index],
+                                               last_alpha=alpha[flat_index].data)
                             )
                 start_index = end_index
                 successors = sorted(successors, key=lambda t: t.score, reverse=True)
@@ -884,7 +890,7 @@ class Seq2SeqAgent(BaseAgent):
             assert this_completed
             this_trajs = []
             for inf_state in this_completed:
-                path_states, path_observations, path_actions, path_scores = backchain_inference_states(inf_state)
+                path_states, path_observations, path_actions, path_scores, path_attentions = backchain_inference_states(inf_state)
                 # this will have messed-up headings for (at least some) starting locations because of
                 # discretization, so read from the observations instead
                 ## path = [(obs.viewpointId, state.heading, state.elevation)
@@ -898,6 +904,7 @@ class Seq2SeqAgent(BaseAgent):
                     'actions': path_actions,
                     'score': inf_state.score,
                     'scores': path_scores,
+                    'attentions': path_attentions
                 })
             trajs.append(this_trajs)
         return trajs
