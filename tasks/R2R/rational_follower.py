@@ -151,7 +151,6 @@ def run_rational_follower(
                     if 'attentions' in candidate:
                         candidate['attentions'] = [list(tens) for tens in candidate['attentions']]
                     del candidate['instr_encoding']
-                    del candidate['trajectory']
                     candidate['rank'] = i
                     candidate['gold'] = (include_gold and i == 0)
             utils.pretty_json_dump(candidate_lists_by_instr_id, f)
