@@ -326,9 +326,8 @@ class AttnDecoderLSTM(nn.Module):
         self.feature_size = feature_size
         self.hidden_size = hidden_size
         # self.embedding = nn.Embedding(input_action_size, embedding_size)
-        u_std = np.sqrt(1. / embedding_size)
-        self.u_begin = nn.Parameter(torch.from_numpy(np.random.normal(
-            0, u_std, (1, embedding_size)).astype(np.float32))).cuda()
+        self.u_begin = try_cuda(Variable(
+            torch.zeros(embedding_size), requires_grad=False))
         self.drop = nn.Dropout(p=dropout_ratio)
         self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
         self.visual_attention_layer = VisualSoftDotAttention(
