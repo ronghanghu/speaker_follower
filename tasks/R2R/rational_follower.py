@@ -8,6 +8,8 @@ import json
 import MatterSim
 import env
 
+from follower import least_common_viewpoint_path, path_element_from_observation
+
 import numpy as np
 
 from collections import namedtuple, Counter
@@ -18,7 +20,7 @@ def run_rational_follower(
         envir, evaluator, follower, speaker, beam_size,
         include_gold=False, output_file=None, eval_file=None,
         compute_oracle=False, mask_undo=False, state_factored_search=False,
-        state_first_n_ws_key=4):
+        state_first_n_ws_key=4, physical_traversal=False):
     follower.env = envir
     envir.reset_epoch()
 
@@ -46,9 +48,9 @@ def run_rational_follower(
 
         follower.feedback = feedback_method
         if state_factored_search:
-            beam_candidates = follower.state_factored_search(beam_size, 1, load_next_minibatch=not include_gold, mask_undo=mask_undo, first_n_ws_key=state_first_n_ws_key)
+            beam_candidates, candidate_inf_states, traversed_lists = follower.state_factored_search(beam_size, 1, load_next_minibatch=not include_gold, mask_undo=mask_undo, first_n_ws_key=state_first_n_ws_key)
         else:
-            beam_candidates = follower.beam_search(beam_size, load_next_minibatch=not include_gold, mask_undo=mask_undo)
+            beam_candidates, candidate_inf_states, traversed_lists = follower.beam_search(beam_size, load_next_minibatch=not include_gold, mask_undo=mask_undo)
 
         if include_gold:
             assert len(gold_candidates) == len(beam_candidates)
@@ -67,7 +69,7 @@ def run_rational_follower(
         speaker_scored_candidates, _ = speaker._score_obs_actions_and_instructions(cand_obs, cand_actions, cand_instr, feedback='teacher')
         assert len(speaker_scored_candidates) == sum(len(l) for l in beam_candidates)
         start_index = 0
-        for instance_candidates in beam_candidates:
+        for instance_index, instance_candidates in enumerate(beam_candidates):
             for i, candidate in enumerate(instance_candidates):
                 speaker_scored_candidate = speaker_scored_candidates[start_index + i]
                 assert candidate['instr_id'] == speaker_scored_candidate['instr_id']
@@ -75,6 +77,19 @@ def run_rational_follower(
                 candidate['speaker_score'] = speaker_scored_candidate['score']
                 # Delete the unnecessary keys not needed for later processing
                 del candidate['observations']
+                if physical_traversal:
+                    last_traversed = traversed_lists[instance_index][-1]
+                    candidate_inf_state = candidate_inf_states[instance_index][i]
+                    path_from_last_to_next = least_common_viewpoint_path(last_traversed, candidate_inf_state)
+                    assert path_from_last_to_next[0].world_state.viewpointId == last_traversed.world_state.viewpointId
+                    assert path_from_last_to_next[-1].world_state.viewpointId == candidate_inf_state.world_state.viewpointId
+
+                    inf_traj = traversed_lists[instance_index] + path_from_last_to_next[1:]
+                    physical_trajectory = [path_element_from_observation(inf_state.observation)
+                                           for inf_state in inf_traj]
+                    # make sure the viewpointIds match
+                    assert physical_trajectory[-1][0] == candidate['trajectory'][-1][0]
+                    candidate['trajectory'] = physical_trajectory
                 if compute_oracle:
                     candidate['eval_result'] = evaluator._score_item(candidate['instr_id'], candidate['trajectory'])._asdict()
             start_index += len(instance_candidates)
@@ -182,7 +197,9 @@ def validate_entry_point(args):
             eval_file=eval_file, compute_oracle=args.compute_oracle,
             mask_undo=args.mask_undo,
             state_factored_search=args.state_factored_search,
-            state_first_n_ws_key=args.state_first_n_ws_key)
+            state_first_n_ws_key=args.state_first_n_ws_key,
+            physical_traversal=args.physical_traversal,
+        )
         pprint.pprint(accuracies_by_weight)
         pprint.pprint({w:sorted(d.items()) for w, d in index_counts_by_weight.items()})
         weight, score_summary = max(accuracies_by_weight.items(), key=lambda pair: pair[1]['success_rate'])
@@ -203,6 +220,7 @@ def make_arg_parser():
     parser.add_argument("--mask_undo", action='store_true')
     parser.add_argument("--state_factored_search", action='store_true')
     parser.add_argument("--state_first_n_ws_key", type=int, default=4)
+    parser.add_argument("--physical_traversal", action='store_true')
 
     return parser
 

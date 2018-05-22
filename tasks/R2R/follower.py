@@ -18,6 +18,17 @@ from utils import vocab_pad_idx, vocab_eos_idx, flatten, structured_map, try_cud
 
 InferenceState = namedtuple("InferenceState", "prev_inference_state, world_state, observation, flat_index, last_action, last_action_embedding, action_count, score, h_t, c_t, last_alpha")
 
+Cons = namedtuple("Cons", "first, rest")
+
+def cons_to_list(cons):
+    l = []
+    while True:
+        l.append(cons.first)
+        cons = cons.rest
+        if cons is None:
+            break
+    return l
+
 def backchain_inference_states(last_inference_state):
     states = []
     observations = []
@@ -37,6 +48,29 @@ def backchain_inference_states(last_inference_state):
         inf_state = inf_state.prev_inference_state
     scores.append(last_score)
     return list(reversed(states)), list(reversed(observations)), list(reversed(actions))[1:], list(reversed(scores))[1:], list(reversed(attentions))[1:] # exclude start action
+
+def least_common_viewpoint_path(inf_state_a, inf_state_b):
+    # return inference states traversing from A to X, then from Y to B,
+    # where X and Y are the least common ancestors of A and B respectively that share a viewpointId
+    path_to_b_by_viewpoint =  {
+    }
+    b = inf_state_b
+    b_stack = Cons(b, None)
+    while b is not None:
+        path_to_b_by_viewpoint[b.world_state.viewpointId] = b_stack
+        b = b.prev_inference_state
+        b_stack = Cons(b, b_stack)
+    a = inf_state_a
+    path_from_a = [a]
+    while a is not None:
+        vp = a.world_state.viewpointId
+        if vp in path_to_b_by_viewpoint:
+            path_to_b = cons_to_list(path_to_b_by_viewpoint[vp])
+            assert path_from_a[-1].world_state.viewpointId == path_to_b[0].world_state.viewpointId
+            return path_from_a + path_to_b[1:]
+        a = a.prev_inference_state
+        path_from_a.append(a)
+    raise AssertionError("no common ancestor found")
 
 def batch_instructions_from_encoded(encoded_instructions, max_length, reverse=False, sort=False):
     # encoded_instructions: list of lists of token indices (should not be padded, or contain BOS or EOS tokens)
@@ -302,7 +336,7 @@ class Seq2SeqAgent(BaseAgent):
             return self._rollout_with_loss()
         else:
             assert self.beam_size >= 1
-            beams = self.beam_search(self.beam_size)
+            beams, _, _ = self.beam_search(self.beam_size)
             return [beam[0] for beam in beams]
 
     def _score_obs_actions_and_instructions(self, path_obs, path_actions, encoded_instructions):
@@ -680,7 +714,8 @@ class Seq2SeqAgent(BaseAgent):
                     'attentions': path_attentions
                 })
             trajs.append(this_trajs)
-        return trajs
+        traversed_lists = None # todo
+        return trajs, completed, traversed_lists
 
     def state_factored_search(self, completion_size, successor_size, load_next_minibatch=True, mask_undo=False, first_n_ws_key=4):
         assert self.env.beam_size >= successor_size
@@ -702,18 +737,46 @@ class Seq2SeqAgent(BaseAgent):
 
         state_cache = [
             {ws[0][0:first_n_ws_key]: (InferenceState(prev_inference_state=None,
-                                    world_state=ws[0],
-                                    observation=o[0],
-                                    flat_index=None,
-                                    last_action=-1,
-                                    last_action_embedding=self.decoder.u_begin.view(-1),
-                                    action_count=0,
-                                    score=0.0, h_t=h_t[i], c_t=c_t[i], last_alpha=None), True)}
+                                                      world_state=ws[0],
+                                                      observation=o[0],
+                                                      flat_index=None,
+                                                      last_action=-1,
+                                                      last_action_embedding=self.decoder.u_begin.view(-1),
+                                                      action_count=0,
+                                                      score=0.0, h_t=h_t[i], c_t=c_t[i], last_alpha=None), True)}
             for i, (ws, o) in enumerate(zip(world_states, initial_obs))
         ]
 
         beams = [[inf_state for world_state, (inf_state, expanded) in sorted(instance_cache.items())]
                  for instance_cache in state_cache] # sorting is a noop here since each instance_cache should only contain one
+
+
+        # traversed_lists = None
+        # list of inference states containing states in order of the states being expanded
+        last_expanded_list = []
+        traversed_lists = []
+        for beam in beams:
+            assert len(beam) == 1
+            first_state = beam[0]
+            last_expanded_list.append(first_state)
+            traversed_lists.append([first_state])
+
+        def update_traversed_lists(new_visited_inf_states):
+            assert len(new_visited_inf_states) == len(last_expanded_list)
+            assert len(new_visited_inf_states) == len(traversed_lists)
+
+            for instance_index, instance_states in enumerate(new_visited_inf_states):
+                last_expanded = last_expanded_list[instance_index]
+                # todo: if this passes, shouldn't need traversed_lists
+                assert last_expanded.world_state.viewpointId == traversed_lists[instance_index][-1].world_state.viewpointId
+                for inf_state in instance_states:
+                    path_from_last_to_next = least_common_viewpoint_path(last_expanded, inf_state)
+                    # path_from_last should include last_expanded's world state as the first element, so check and drop that
+                    assert path_from_last_to_next[0].world_state.viewpointId == last_expanded.world_state.viewpointId
+                    assert path_from_last_to_next[-1].world_state.viewpointId == inf_state.world_state.viewpointId
+                    traversed_lists[instance_index].extend(path_from_last_to_next[1:])
+                    last_expanded = inf_state
+                last_expanded_list[instance_index] = last_expanded
 
         # Do a sequence rollout and calculate the loss
         while any(len(comp) < completion_size for comp in completed):
@@ -873,6 +936,7 @@ class Seq2SeqAgent(BaseAgent):
             successor_obs = self.env.observe(world_states, beamed=True)
             beams = structured_map(lambda inf_state, obs: inf_state._replace(observation=obs),
                                    beams, successor_obs, nested=True)
+            update_traversed_lists(beams)
 
         completed_list = []
         for this_completed in completed:
@@ -884,6 +948,10 @@ class Seq2SeqAgent(BaseAgent):
         completed_obs = self.env.observe(completed_ws, beamed=True)
         completed_list = structured_map(lambda inf_state, obs: inf_state._replace(observation=obs),
                                         completed_list, completed_obs, nested=True)
+        # TODO: consider moving observations and this update earlier so that we don't have to traverse as far back
+        update_traversed_lists(completed_list)
+
+        # TODO: sanity check the traversed lists here
 
         trajs = []
         for this_completed in completed_list:
@@ -907,7 +975,9 @@ class Seq2SeqAgent(BaseAgent):
                     'attentions': path_attentions
                 })
             trajs.append(this_trajs)
-        return trajs
+        # completed_list: list of lists of final inference states corresponding to the candidates, one list per instance
+        # traversed_lists: list of "physical states" that the robot has explored, one per instance
+        return trajs, completed_list, traversed_lists
 
     def set_beam_size(self, beam_size):
         if self.env.beam_size < beam_size:
