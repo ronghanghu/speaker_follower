@@ -17,6 +17,7 @@ import pickle
 import os
 import os.path
 import sys
+import itertools
 
 from collections import namedtuple, defaultdict
 
@@ -598,7 +599,7 @@ class EnvBatch():
 
     def sims_view(self, beamed):
         if beamed:
-            return self.sims
+            return [itertools.cycle(sim_list) for sim_list in self.sims]
         else:
             return (s[0] for s in self.sims)
 
