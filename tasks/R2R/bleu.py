@@ -11,9 +11,11 @@ BLEU_PATH = join("scripts", "multi-bleu.perl")
 BASE_REF_FNAME = "ref"
 HYP_FNAME = "hyp"
 
+
 def call_bleu(base_ref_fname, hyp_fname):
     command = "perl %s %s < %s" % (BLEU_PATH, base_ref_fname, hyp_fname)
-    result = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE).stdout.read().decode("utf-8")
+    result = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)\
+        .stdout.read().decode("utf-8")
 
     match = re.match("BLEU = ([\d.]+),.*BP=([\d.]+),.*\)", result)
     if match is not None:
@@ -26,12 +28,15 @@ def call_bleu(base_ref_fname, hyp_fname):
         return bleu, unpenalized
 
     else:
-        sys.stderr.write("warning: BLEU score not found in output file, returning 0")
+        sys.stderr.write(
+            "warning: BLEU score not found in output file, returning 0")
         return 0, 0
+
 
 def read_file(fname):
     with open(fname) as f:
         return [line.split() for line in f]
+
 
 def multi_bleu(multiple_references, hypotheses):
     dir = tempfile.mkdtemp()
@@ -62,8 +67,10 @@ def multi_bleu(multiple_references, hypotheses):
 
     return bleu, unpenalized_bleu
 
+
 def single_bleu( references, hypotheses):
     return multi_bleu([[ref] for ref in references], hypotheses)
+
 
 if __name__ == "__main__":
     import argparse
@@ -87,14 +94,16 @@ if __name__ == "__main__":
         for (ref, hyp) in zip(refs, hyps):
             if args.nltk:
                 import nltk
-                scores.append(nltk.translate.bleu_score.sentence_bleu([ref], hyp))
+                scores.append(
+                    nltk.translate.bleu_score.sentence_bleu([ref], hyp))
             else:
                 scores.append(single_bleu([ref], [hyp])[0])
         result = np.mean(scores)
     else:
         if args.nltk:
             import nltk
-            result = nltk.translate.bleu_score.corpus_bleu([[r] for r in refs], hyps)
+            result = nltk.translate.bleu_score.corpus_bleu(
+                [[r] for r in refs], hyps)
         result = single_bleu(refs, hyps)[0]
 
     print(result)

@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -16,9 +15,13 @@ def make_image_attention_layers(args, image_features_list, hidden_size):
     for featurizer in image_features_list:
         if isinstance(featurizer, ConvolutionalImageFeatures):
             if args.image_attention_type == 'feedforward':
-                attention_mechs.append(MultiplicativeImageAttention(hidden_size, image_attention_size, image_feature_size=featurizer.feature_dim))
+                attention_mechs.append(MultiplicativeImageAttention(
+                    hidden_size, image_attention_size,
+                    image_feature_size=featurizer.feature_dim))
             elif args.image_attention_type == 'multiplicative':
-                attention_mechs.append(FeedforwardImageAttention(hidden_size, image_attention_size, image_feature_size=featurizer.feature_dim))
+                attention_mechs.append(FeedforwardImageAttention(
+                    hidden_size, image_attention_size,
+                    image_feature_size=featurizer.feature_dim))
         elif isinstance(featurizer, BottomUpImageFeatures):
             attention_mechs.append(BottomUpImageAttention(
                 hidden_size,
@@ -31,7 +34,8 @@ def make_image_attention_layers(args, image_features_list, hidden_size):
             ))
         else:
             attention_mechs.append(None)
-    attention_mechs = [try_cuda(mech) if mech else mech for mech in attention_mechs]
+    attention_mechs = [
+        try_cuda(mech) if mech else mech for mech in attention_mechs]
     return attention_mechs
 
 
@@ -41,7 +45,7 @@ class EncoderLSTM(nn.Module):
         attention methods) and a decoder initial state. '''
 
     def __init__(self, vocab_size, embedding_size, hidden_size, padding_idx,
-                            dropout_ratio, bidirectional=False, num_layers=1, glove=None):
+                 dropout_ratio, bidirectional=False, num_layers=1, glove=None):
         super(EncoderLSTM, self).__init__()
         self.embedding_size = embedding_size
         self.hidden_size = hidden_size
@@ -58,8 +62,7 @@ class EncoderLSTM(nn.Module):
                             batch_first=True, dropout=dropout_ratio,
                             bidirectional=bidirectional)
         self.encoder2decoder = nn.Linear(hidden_size * self.num_directions,
-            hidden_size * self.num_directions
-        )
+                                         hidden_size * self.num_directions)
 
     def init_state(self, batch_size):
         ''' Initialize to zero cell states and hidden states.'''
@@ -91,14 +94,14 @@ class EncoderLSTM(nn.Module):
             c_t = torch.cat((enc_c_t[-1], enc_c_t[-2]), 1)
         else:
             h_t = enc_h_t[-1]
-            c_t = enc_c_t[-1] # (batch, hidden_size)
+            c_t = enc_c_t[-1]  # (batch, hidden_size)
 
         decoder_init = nn.Tanh()(self.encoder2decoder(h_t))
 
         ctx, lengths = pad_packed_sequence(enc_h, batch_first=True)
         ctx = self.drop(ctx)
-        return ctx,decoder_init,c_t  # (batch, seq_len, hidden_size*num_directions)
-                                 # (batch, hidden_size)
+        # (batch, seq_len, hidden_size*num_directions), (batch, hidden_size)
+        return ctx, decoder_init, c_t
 
 
 class SoftDotAttention(nn.Module):
@@ -180,7 +183,8 @@ class FeedforwardImageAttention(nn.Module):
         self.feature_size = image_feature_size
         self.context_size = context_size
         self.hidden_size = hidden_size
-        self.fc1_feature = nn.Conv2d(image_feature_size, hidden_size, kernel_size=1, bias=False)
+        self.fc1_feature = nn.Conv2d(
+            image_feature_size, hidden_size, kernel_size=1, bias=False)
         self.fc1_context = nn.Linear(context_size, hidden_size, bias=True)
         self.fc2 = nn.Conv2d(hidden_size, 1, kernel_size=1, bias=True)
 
@@ -191,10 +195,13 @@ class FeedforwardImageAttention(nn.Module):
         context_hidden = context_hidden.unsqueeze(-1).unsqueeze(-1)
         x = feature_hidden + context_hidden
         x = self.fc2(F.relu(x))
-        attention = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1) # batch_size x (width * height) x 1
-        reshaped_features = feature.view(batch_size, self.feature_size, -1) # batch_size x feature_size x (width * height)
-        x = torch.bmm(reshaped_features, attention) # batch_size x
+        # batch_size x (width * height) x 1
+        attention = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1)
+        # batch_size x feature_size x (width * height)
+        reshaped_features = feature.view(batch_size, self.feature_size, -1)
+        x = torch.bmm(reshaped_features, attention)  # batch_size x
         return x.squeeze(-1), attention.squeeze(-1)
+
 
 class MultiplicativeImageAttention(nn.Module):
     def __init__(self, context_size, hidden_size, image_feature_size=2048):
@@ -202,24 +209,35 @@ class MultiplicativeImageAttention(nn.Module):
         self.feature_size = image_feature_size
         self.context_size = context_size
         self.hidden_size = hidden_size
-        self.fc1_feature = nn.Conv2d(image_feature_size, hidden_size, kernel_size=1, bias=True)
+        self.fc1_feature = nn.Conv2d(
+            image_feature_size, hidden_size, kernel_size=1, bias=True)
         self.fc1_context = nn.Linear(context_size, hidden_size, bias=True)
         self.fc2 = nn.Conv2d(hidden_size, 1, kernel_size=1, bias=True)
 
     def forward(self, feature, context):
         batch_size = feature.shape[0]
-        feature_hidden = self.fc1_feature(feature) # batch_size x hidden_size x width x height
-        context_hidden = self.fc1_context(context) # batch_size x hidden_size
-        context_hidden = context_hidden.unsqueeze(-2) # batch_size x 1 x hidden_size
-        feature_hidden = feature_hidden.view(batch_size, self.hidden_size, -1) # batch_size x hidden_size x (width * height)
-        x = torch.bmm(context_hidden, feature_hidden) # batch_size x 1 x (width x height)
-        attention = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1) # batch_size x (width * height) x 1
-        reshaped_features = feature.view(batch_size, self.feature_size, -1) # batch_size x feature_size x (width * height)
-        x = torch.bmm(reshaped_features, attention) # batch_size x
+        # batch_size x hidden_size x width x height
+        feature_hidden = self.fc1_feature(feature)
+        # batch_size x hidden_size
+        context_hidden = self.fc1_context(context)
+        # batch_size x 1 x hidden_size
+        context_hidden = context_hidden.unsqueeze(-2)
+        # batch_size x hidden_size x (width * height)
+        feature_hidden = feature_hidden.view(batch_size, self.hidden_size, -1)
+        # batch_size x 1 x (width x height)
+        x = torch.bmm(context_hidden, feature_hidden)
+        # batch_size x (width * height) x 1
+        attention = F.softmax(x.view(batch_size, -1), 1).unsqueeze(-1)
+        # batch_size x feature_size x (width * height)
+        reshaped_features = feature.view(batch_size, self.feature_size, -1)
+        x = torch.bmm(reshaped_features, attention)  # batch_size x
         return x.squeeze(-1), attention.squeeze(-1)
 
+
 class BottomUpImageAttention(nn.Module):
-    def __init__(self, context_size, object_embedding_size, attribute_embedding_size, hidden_size, num_objects, num_attributes, image_feature_size=2048):
+    def __init__(self, context_size, object_embedding_size,
+                 attribute_embedding_size, hidden_size, num_objects,
+                 num_attributes, image_feature_size=2048):
         super(BottomUpImageAttention, self).__init__()
         self.context_size = context_size
         self.object_embedding_size = object_embedding_size
@@ -227,14 +245,17 @@ class BottomUpImageAttention(nn.Module):
         self.hidden_size = hidden_size
         self.num_objects = num_objects
         self.num_attributes = num_attributes
-        self.feature_size = image_feature_size + object_embedding_size + attribute_embedding_size + 1 + 5
+        self.feature_size = (image_feature_size + object_embedding_size +
+                             attribute_embedding_size + 1 + 5)
 
-        self.object_embedding = nn.Embedding(num_objects, object_embedding_size)
-        self.attribute_embedding = nn.Embedding(num_attributes, attribute_embedding_size)
+        self.object_embedding = nn.Embedding(
+            num_objects, object_embedding_size)
+        self.attribute_embedding = nn.Embedding(
+            num_attributes, attribute_embedding_size)
 
         self.fc1_context = nn.Linear(context_size, hidden_size)
         self.fc1_feature = nn.Linear(self.feature_size, hidden_size)
-        #self.fc1 = nn.Linear(context_size + self.feature_size, hidden_size)
+        # self.fc1 = nn.Linear(context_size + self.feature_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, 1)
 
     def forward(self, bottom_up_features, context):
@@ -243,21 +264,36 @@ class BottomUpImageAttention(nn.Module):
         # attribute_ids: batch_size x max_num_detections
         # no_object_mask: batch_size x max_num_detections
         # context: batch_size x context_size
-        attribute_embedding = self.attribute_embedding(bottom_up_features.attribute_indices) # batch_size x max_num_detections x embedding_size
-        object_embedding = self.object_embedding(bottom_up_features.object_indices) # batch_size x max_num_detections x embedding_size
-        feats = torch.cat((bottom_up_features.cls_prob.unsqueeze(2), bottom_up_features.image_features, attribute_embedding, object_embedding, bottom_up_features.spatial_features), dim=2) # batch_size x max_num_detections x (feat size)
+
+        # batch_size x max_num_detections x embedding_size
+        attribute_embedding = self.attribute_embedding(
+            bottom_up_features.attribute_indices)
+        # batch_size x max_num_detections x embedding_size
+        object_embedding = self.object_embedding(
+            bottom_up_features.object_indices)
+        # batch_size x max_num_detections x (feat size)
+        feats = torch.cat((
+            bottom_up_features.cls_prob.unsqueeze(2),
+            bottom_up_features.image_features,
+            attribute_embedding, object_embedding,
+            bottom_up_features.spatial_features), dim=2)
 
         # attended_feats = feats.mean(dim=1)
         # attention = None
 
-        x_context = self.fc1_context(context).unsqueeze(1) # batch_size x 1 x hidden_size
-        x_feature = self.fc1_feature(feats) # batch_size x max_num_detections x hidden_size
-        x = x_context * x_feature # batch_size x max_num_detections x hidden_size
+        # batch_size x 1 x hidden_size
+        x_context = self.fc1_context(context).unsqueeze(1)
+        # batch_size x max_num_detections x hidden_size
+        x_feature = self.fc1_feature(feats)
+        # batch_size x max_num_detections x hidden_size
+        x = x_context * x_feature
         x = x / torch.norm(x, p=2, dim=2, keepdim=True)
-        x = self.fc2(x).squeeze(-1) # batch_size x max_num_detections
+        x = self.fc2(x).squeeze(-1)  # batch_size x max_num_detections
         x.data.masked_fill_(bottom_up_features.no_object_mask, -float("inf"))
-        attention = F.softmax(x, 1).unsqueeze(1) # batch_size x 1 x max_num_detections
-        attended_feats = torch.bmm(attention, feats).squeeze(1) # batch_size x feat_size
+        # batch_size x 1 x max_num_detections
+        attention = F.softmax(x, 1).unsqueeze(1)
+        # batch_size x feat_size
+        attended_feats = torch.bmm(attention, feats).squeeze(1)
         return attended_feats, attention
 
 
@@ -317,7 +353,10 @@ class EltwiseProdScoring(nn.Module):
 
 
 class AttnDecoderLSTM(nn.Module):
-    ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
+    '''
+    An unrolled LSTM with attention over instructions for decoding navigation
+    actions.
+    '''
 
     def __init__(self, embedding_size, hidden_size, dropout_ratio,
                  feature_size=2048+128, image_attention_layers=None):
@@ -357,11 +396,15 @@ class AttnDecoderLSTM(nn.Module):
         logit = self.decoder2action(h_tilde, all_u_t)
         return h_1, c_1, alpha, logit, alpha_v
 
-## speaker models
+
+###############################################################################
+# speaker models
+###############################################################################
+
 
 class SpeakerEncoderLSTM(nn.Module):
-    def __init__(self, action_embedding_size, world_embedding_size, hidden_size,
-                 dropout_ratio, bidirectional=False):
+    def __init__(self, action_embedding_size, world_embedding_size,
+                 hidden_size, dropout_ratio, bidirectional=False):
         super(SpeakerEncoderLSTM, self).__init__()
         assert not bidirectional, 'Bidirectional is not implemented yet'
 
@@ -371,7 +414,8 @@ class SpeakerEncoderLSTM(nn.Module):
         self.drop = nn.Dropout(p=dropout_ratio)
         self.visual_attention_layer = VisualSoftDotAttention(
             hidden_size, world_embedding_size)
-        self.lstm = nn.LSTMCell(action_embedding_size + world_embedding_size, hidden_size)
+        self.lstm = nn.LSTMCell(
+            action_embedding_size + world_embedding_size, hidden_size)
         self.encoder2decoder = nn.Linear(hidden_size, hidden_size)
 
     def init_state(self, batch_size):
@@ -382,7 +426,8 @@ class SpeakerEncoderLSTM(nn.Module):
             torch.zeros(batch_size, self.hidden_size), requires_grad=False)
         return try_cuda(h0), try_cuda(c0)
 
-    def _forward_one_step(self, h_0, c_0, action_embedding, world_state_embedding):
+    def _forward_one_step(self, h_0, c_0, action_embedding,
+                          world_state_embedding):
         feature, _ = self.visual_attention_layer(h_0, world_state_embedding)
         concat_input = torch.cat((action_embedding, feature), 1)
         drop = self.drop(concat_input)
@@ -409,13 +454,12 @@ class SpeakerEncoderLSTM(nn.Module):
 
         ctx = torch.stack(h_list, dim=1)  # (batch, seq_len, hidden_size)
         ctx = self.drop(ctx)
-        return ctx, decoder_init, c
-        # (batch, hidden_size)
+        return ctx, decoder_init, c  # (batch, hidden_size)
 
 
 class SpeakerDecoderLSTM(nn.Module):
-
-    def __init__(self, vocab_size, vocab_embedding_size, hidden_size, dropout_ratio, glove=None, use_input_att_feed=False):
+    def __init__(self, vocab_size, vocab_embedding_size, hidden_size,
+                 dropout_ratio, glove=None, use_input_att_feed=False):
         super(SpeakerDecoderLSTM, self).__init__()
         self.vocab_size = vocab_size
         self.vocab_embedding_size = vocab_embedding_size
@@ -450,8 +494,8 @@ class SpeakerDecoderLSTM(nn.Module):
         ctx: batch x seq_len x dim
         ctx_mask: batch x seq_len - indices to be masked
         '''
-        word_embeds = self.embedding(previous_word)   # (batch, 1, embedding_size)
-        word_embeds = word_embeds.squeeze()
+        word_embeds = self.embedding(previous_word)
+        word_embeds = word_embeds.squeeze()  # (batch, embedding_size)
         if not self.use_glove:
             word_embeds_drop = self.drop(word_embeds)
         else:
@@ -461,15 +505,15 @@ class SpeakerDecoderLSTM(nn.Module):
             h_tilde, alpha = self.attention_layer(
                 self.drop(h_0), ctx, ctx_mask)
             concat_input = torch.cat((word_embeds_drop, self.drop(h_tilde)), 1)
-            h_1,c_1 = self.lstm(concat_input, (h_0,c_0))
+            h_1, c_1 = self.lstm(concat_input, (h_0, c_0))
             x = torch.cat((h_1, h_tilde), 1)
             x = self.drop(x)
             x = self.output_l1(x)
             x = self.tanh(x)
             logit = self.decoder2action(x)
         else:
-            h_1,c_1 = self.lstm(word_embeds_drop, (h_0,c_0))
+            h_1, c_1 = self.lstm(word_embeds_drop, (h_0, c_0))
             h_1_drop = self.drop(h_1)
             h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
             logit = self.decoder2action(h_tilde)
-        return h_1,c_1,alpha,logit
+        return h_1, c_1, alpha, logit
