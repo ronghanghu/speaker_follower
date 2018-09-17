@@ -205,7 +205,8 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits,
 
 def train_setup(args):
     train_splits = ['train']
-    val_splits = ['train_subset', 'val_seen', 'val_unseen']
+    # val_splits = ['train_subset', 'val_seen', 'val_unseen']
+    val_splits = ['val_seen', 'val_unseen']
     vocab = TRAIN_VOCAB
 
     if args.use_train_subset:
