@@ -107,7 +107,7 @@ export SPEAKER_PATH_PREFIX=tasks/R2R/snapshots/release/speaker_final_release
 export FOLLOWER_PATH_PREFIX=tasks/R2R/snapshots/release/follower_final_release
 ```
 
-### Test
+### Inference
 
 1. Set the path prefixes for the trained speaker and follower model:  
 ```
