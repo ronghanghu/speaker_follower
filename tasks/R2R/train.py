@@ -231,13 +231,15 @@ def train_setup(args, batch_size=BATCH_SIZE):
             'must specify at least one pretrain split'
         pretrain_env = make_more_train_env(
             args, vocab, pretrain_splits, batch_size=batch_size)
-    else:
-        pretrain_env = None
 
     agent = Seq2SeqAgent(
         train_env, "", encoder, decoder, max_episode_len,
         max_instruction_length=MAX_INPUT_LENGTH)
-    return agent, train_env, val_envs, pretrain_env
+
+    if args.use_pretraining:
+        return agent, train_env, val_envs, pretrain_env
+    else:
+        return agent, train_env, val_envs
 
 
 # Test set prediction will be handled separately
@@ -253,7 +255,10 @@ def train_setup(args, batch_size=BATCH_SIZE):
 
 def train_val(args):
     ''' Train on the training set, and validate on seen and unseen splits. '''
-    agent, train_env, val_envs, pretrain_env = train_setup(args)
+    if args.use_pretraining:
+        agent, train_env, val_envs, pretrain_env = train_setup(args)
+    else:
+        agent, train_env, val_envs = train_setup(args)
 
     encoder_optimizer = optim.Adam(
         filter_param(agent.encoder.parameters()), lr=learning_rate,
@@ -262,7 +267,7 @@ def train_val(args):
         filter_param(agent.decoder.parameters()), lr=learning_rate,
         weight_decay=weight_decay)
 
-    if pretrain_env:
+    if args.use_pretraining:
         train(args, pretrain_env, agent, encoder_optimizer, decoder_optimizer,
               args.n_pretrain_iters, val_envs=val_envs)
 
