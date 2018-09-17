@@ -75,7 +75,7 @@ python tasks/R2R/train_speaker.py
 # the path prefix to the speaker model (trained in Step 1 above)
 export SPEAKER_PATH_PREFIX=tasks/R2R/speaker/snapshots/speaker_teacher_imagenet_mean_pooled_train_iter_20000
 
-python tasks/R2R/selfplay_from_speaker.py \
+python tasks/R2R/data_augmentation_from_speaker.py \
     $SPEAKER_PATH_PREFIX \
     tasks/R2R/data/R2R
 ```
@@ -93,6 +93,7 @@ The follower will be first trained on the combination of the original `train` en
 original `train` environment for 20000 iterations. This step may take a long time. (It look approximately 50 hours using a single GPU on our local machine.)
 
 #### Note
+
 * All the commands above run on a single GPU. You may choose a specific GPU by setting `CUDA_VISIBLE_DEVICES` environment variable (e.g. `export CUDA_VISIBLE_DEVICES=1` to use GPU 1).
 * You may directly download our trained speaker model and follower model with
 ```
