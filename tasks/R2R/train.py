@@ -28,6 +28,7 @@ MAX_INPUT_LENGTH = 80
 BATCH_SIZE = 100
 max_episode_len = 10
 word_embedding_size = 300
+glove_path = 'tasks/R2R/data/train_glove.npy'
 action_embedding_size = 2048+128
 hidden_size = 512
 dropout_ratio = 0.5
@@ -182,7 +183,7 @@ def make_env_and_models(args, train_vocab_path, train_splits, test_splits,
                          splits=train_splits, tokenizer=tok)
 
     enc_hidden_size = hidden_size//2 if args.bidirectional else hidden_size
-    glove = np.load('tasks/R2R/data/train_glove.npy')
+    glove = np.load(glove_path)
     feature_size = FEATURE_SIZE
     encoder = try_cuda(EncoderLSTM(
         len(vocab), word_embedding_size, enc_hidden_size, vocab_pad_idx,
