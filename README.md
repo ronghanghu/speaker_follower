@@ -121,9 +121,8 @@ export FOLLOWER_PATH_PREFIX=tasks/R2R/snapshots/follower_with_pretraining_sample
 # Specify the path prefix to the output evaluation file
 export EVAL_FILE_PREFIX=tasks/R2R/eval_outputs/pragmatics
 
-CUDA_VISIBLE_DEVICES=0 python tasks/R2R/rational_follower.py \
-    $FOLLOWER_PATH_PREFIX \
-    $SPEAKER_PATH_PREFIX \
+python tasks/R2R/rational_follower.py \
+    $FOLLOWER_PATH_PREFIX $SPEAKER_PATH_PREFIX \
     --batch_size 15 --beam_size 40 --state_factored_search \
     --use_test_set \
     --eval_file $EVAL_FILE_PREFIX
@@ -135,9 +134,8 @@ This will generate the prediction files in the directory of `EVAL_FILE_PREFIX`, 
 # Specify the path prefix to the output evaluation file
 export EVAL_FILE_PREFIX=tasks/R2R/eval_outputs/pragmatics_physical
 
-CUDA_VISIBLE_DEVICES=0 python tasks/R2R/rational_follower.py \
-    $FOLLOWER_PATH_PREFIX \
-    $SPEAKER_PATH_PREFIX \
+python tasks/R2R/rational_follower.py \
+    $FOLLOWER_PATH_PREFIX $SPEAKER_PATH_PREFIX \
     --batch_size 15 --beam_size 40 --state_factored_search \
     --use_test_set --physical_traversal \
     --eval_file $EVAL_FILE_PREFIX
