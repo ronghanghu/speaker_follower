@@ -90,7 +90,8 @@ def make_arg_parser():
     parser.add_argument("speaker_model_prefix")
     parser.add_argument("pred_results_output_file")
     parser.add_argument("--batch_size", type=int, default=20)
-    parser.add_argument("--pred_splits", nargs="+", default=["train_selfplay"])
+    parser.add_argument("--pred_splits", nargs="+",
+                        default=["data_augmentation_paths"])
 
     # for rational self-play generation
     parser.add_argument("--follower_model_prefix",
