@@ -90,11 +90,9 @@ python tasks/R2R/train.py \
   --use_pretraining --pretrain_splits train literal_speaker_data_augmentation_paths
 ```
 The follower will be first trained on the combination of the original `train` environment and the new `literal_speaker_data_augmentation_paths` (generated in Step 2 above) for 50000 iterations, and then fine-tuned on the
-original `train` environment for 20000 iterations.
+original `train` environment for 20000 iterations. This step may take a long time. (It look approximately 50 hours using a single GPU on our local machine.)
 
-This step may take a long time. (It look approximately 50 hours using a single GPU on our local machine.)
-
-Note:
+#### Note
 * All the commands above run on a single GPU. You may choose a specific GPU by setting `CUDA_VISIBLE_DEVICES` environment variable (e.g. `export CUDA_VISIBLE_DEVICES=1` to use GPU 1).
 * You may directly download our trained speaker model and follower model with
 ```
@@ -129,9 +127,7 @@ CUDA_VISIBLE_DEVICES=0 python tasks/R2R/rational_follower.py \
     --use_test_set \
     --eval_file $EVAL_FILE_PREFIX
 ```
-This will generate the prediction files in the directory of `EVAL_FILE_PREFIX`, and also print the performance on `val_seen` and `val_unseen` splits.
-
-The predicted trajectories with the above script contain only the **top-scoring trajectories** among all candidate trajectories, ranked with pragmatic inference.
+This will generate the prediction files in the directory of `EVAL_FILE_PREFIX`, and also print the performance on `val_seen` and `val_unseen` splits. (The displayed performance will be zero on the `test` split, since the test JSON file does not contain ground-truth target locations.) The predicted trajectories with the above script contain only the **top-scoring trajectories** among all candidate trajectories, ranked with pragmatic inference.
 
 3. For participating in the [Vision-and-Language Navigation Challenge](https://evalai.cloudcv.org/web/challenges/challenge-page/97/overview), add `--physical_traversal` option to generate physically-plausible trajectory predictions with pragmatic inference:
 ```
