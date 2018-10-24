@@ -105,6 +105,10 @@ The scripts above will save the downloaded models under `./tasks/R2R/snapshots/r
 export SPEAKER_PATH_PREFIX=tasks/R2R/snapshots/release/speaker_final_release
 export FOLLOWER_PATH_PREFIX=tasks/R2R/snapshots/release/follower_final_release
 ```
+* One can also train the follower only on the original training data *without using the augmented data from the speaker* as follows:
+```
+python tasks/R2R/train.py
+```
 
 ### Inference
 
@@ -127,7 +131,7 @@ python tasks/R2R/rational_follower.py \
     --use_test_set \
     --eval_file $EVAL_FILE_PREFIX
 ```
-This will generate the prediction files in the directory of `EVAL_FILE_PREFIX`, and also print the performance on `val_seen` and `val_unseen` splits. (The displayed performance will be zero on the `test` split, since the test JSON file does not contain ground-truth target locations.) The predicted trajectories with the above script contain only the **top-scoring trajectories** among all candidate trajectories, ranked with pragmatic inference.
+This will generate the prediction files in the directory of `EVAL_FILE_PREFIX`, and also print the performance on `val_seen` and `val_unseen` splits. (The displayed performance will be zero on the `test` split, since the test JSON file does not contain ground-truth target locations.) The predicted trajectories with the above script contain only the **top-scoring trajectories** among all candidate trajectories, ranked with pragmatic inference. The expected success rates are 70.1% and 54.6% on `val_seen` and `val_unseen`, respectively.
 
 3. For participating in the [Vision-and-Language Navigation Challenge](https://evalai.cloudcv.org/web/challenges/challenge-page/97/overview), add `--physical_traversal` option to generate physically-plausible trajectory predictions with pragmatic inference:
 ```
@@ -140,9 +144,21 @@ python tasks/R2R/rational_follower.py \
     --use_test_set --physical_traversal \
     --eval_file $EVAL_FILE_PREFIX
 ```
-This will generate the prediction files in the directory of `EVAL_FILE_PREFIX`. These prediction files can be submitted to https://evalai.cloudcv.org/web/challenges/challenge-page/97/overview for evaluation.
+This will generate the prediction files in the directory of `EVAL_FILE_PREFIX`. These prediction files can be submitted to https://evalai.cloudcv.org/web/challenges/challenge-page/97/overview for evaluation. The expected success rate on the challenge test set is 53.5%.
 
 The major difference with `--physical_traversal` is that now the generated trajectories contain **all states visited by the search algorithm in the order they are traversed**. The agent expands each route one step forward at a time, and then switches to expand the next route. The details are explained in Appendix E in [our paper](https://arxiv.org/pdf/1806.02724.pdf).
+
+4. In addition, it is also possible to evaluate the performance of the follower alone, using greedy decoding (without pragmatic inference from the speaker):
+```
+export EVAL_FILE_PREFIX=tasks/R2R/eval_outputs/greedy
+
+python tasks/R2R/validate.py \
+    $FOLLOWER_PATH_PREFIX \
+    --batch_size 100 \
+    --use_test_set \
+    --eval_file $EVAL_FILE_PREFIX
+```
+This will generate the prediction files in the directory of `EVAL_FILE_PREFIX`, and also print the performance on `val_seen` and `val_unseen` splits. (The displayed performance will be zero on the `test` split, since the test JSON file does not contain ground-truth target locations.) The expected success rates are 66.4% and 35.5% on `val_seen` and `val_unseen`, respectively.
 
 ## Acknowledgements
 
