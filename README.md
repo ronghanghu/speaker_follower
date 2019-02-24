@@ -58,7 +58,7 @@ cd ../
 ```
 mkdir -p img_features/
 cd img_features/
-wget https://storage.googleapis.com/bringmeaspoon/img_features/ResNet-152-imagenet.zip -O ResNet-152-imagenet.zip
+wget https://www.dropbox.com/s/715bbj8yjz32ekf/ResNet-152-imagenet.zip?dl=1 -O ResNet-152-imagenet.zip
 unzip ResNet-152-imagenet.zip
 cd ..
 ```
