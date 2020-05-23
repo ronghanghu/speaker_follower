@@ -58,10 +58,12 @@ cd ../
 ```
 mkdir -p img_features/
 cd img_features/
-wget https://www.dropbox.com/s/715bbj8yjz32ekf/ResNet-152-imagenet.zip?dl=1 -O ResNet-152-imagenet.zip
+wget https://www.dropbox.com/s/o57kxh2mn5rkx4o/ResNet-152-imagenet.zip?dl=1 -O ResNet-152-imagenet.zip
 unzip ResNet-152-imagenet.zip
 cd ..
 ```
+(In case the URL above doesn't work, it is likely because the Room-to-Room dataset changed its feature URLs. You can find the latest download links [here](https://github.com/peteanderson80/Matterport3DSimulator#precomputing-resnet-image-features).)
+
 After this step, `img_features/` should contain `ResNet-152-imagenet.tsv`. (Note that you only need to download the features extracted from ImageNet-pretrained ResNet to run the following experiments. Places-pretrained ResNet features or actual images are not required.)
 
 2. Download the R2R dataset and our sampled trajectories for data augmentation:
