@@ -664,11 +664,12 @@ class EnvBatch():
 class R2RBatch():
     ''' Implements the Room to Room navigation task, using discretized viewpoints and pretrained features '''
 
-    def __init__(self, image_features_list, batch_size=100, seed=10, splits=['train'], tokenizer=None, beam_size=1, instruction_limit=None):
+    def __init__(self, image_features_list, batch_size=100, seed=10, splits=['train'], tokenizer=None, beam_size=1, instruction_limit=None, with_objects=False):
         self.image_features_list = image_features_list
         self.data = []
         self.scans = []
         self.gt = {}
+        self.objects_by_words = {}
         for item in load_datasets(splits):
             # Split multiple instructions into separate entries
             assert item['path_id'] not in self.gt
@@ -695,9 +696,16 @@ class R2RBatch():
         self.ix = 0
         self.batch_size = batch_size
         self._load_nav_graphs()
+        self.with_objects = with_objects
+        if with_objects and self.splits == ['train']:
+            self._load_objects_by_word()
         self.set_beam_size(beam_size)
         self.print_progress = False
         print('R2RBatch loaded with %d instructions, using splits: %s' % (len(self.data), ",".join(splits)))
+        if self.with_objects:
+            print('Using objects to generate better instructions')
+        else:
+            print('Using base model')
 
     def set_beam_size(self, beam_size, force_reload=False):
         # warning: this will invalidate the environment, self.reset() should be called afterward!
@@ -719,6 +727,15 @@ class R2RBatch():
         self.distances = {}
         for scan,G in self.graphs.items(): # compute all shortest paths
             self.distances[scan] = dict(nx.all_pairs_dijkstra_path_length(G))
+
+    def _load_objects_by_word(self):
+        ''' Load objects that should be en each word (or instruction) '''
+        with open('data/train_objects_by_word.pickle', 'rb') as file:
+            data = pickle.load(file)
+
+        print(f'Loading objects of 3 instruction per {len(data.keys())} paths')
+        self.objects_by_words = data
+
 
     def _next_minibatch(self, sort_instr_length):
         batch = self.data[self.ix:self.ix+self.batch_size]

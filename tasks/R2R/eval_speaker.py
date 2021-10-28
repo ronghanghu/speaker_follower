@@ -95,6 +95,7 @@ class SpeakerEvaluation(object):
             all_hyps.append(tokenized_hyp)
 
             if verbose and instr_count % 100 == 0:
+                print(f"path_id (base id): {base_id}")
                 for i, ref in enumerate(tokenized_refs):
                     print("ref {}:\t{}".format(i, ' '.join(ref)))
                 print("pred  :\t{}".format(' '.join(tokenized_hyp)))

@@ -1,5 +1,6 @@
 *~
-/data
+/data/visual_genome
+/data/working_data
 /build
 /doxygen
 *.tsv

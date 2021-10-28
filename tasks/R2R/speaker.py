@@ -129,6 +129,9 @@ class Seq2SeqSpeaker(object):
                 path_obs, path_actions, encoded_instructions)
 
         instr_seq, _, _ = batch_instructions_from_encoded(encoded_instructions, self.instruction_len)
+        if self.env.with_objects and self.env.splits == ['train']:
+            objects_seq = self.batch_objects_by_word(path_obs, instr_seq, self.instruction_len)
+            number_of_objects_by_word = objects_seq.size(dim=0)
 
         batch_size = len(start_obs)
 
@@ -181,8 +184,13 @@ class Seq2SeqSpeaker(object):
             sequence_scores += word_scores.data
             loss += F.nll_loss(log_probs, target, ignore_index=vocab_pad_idx, reduce=True, size_average=True)
 
+            if self.env.with_objects and self.env.splits == ['train']:
+                for object_idx in range(number_of_objects_by_word):
+                    object_target = objects_seq[object_idx, :, t].contiguous()
+                    loss += 0.3 * F.nll_loss(log_probs, object_target, ignore_index=vocab_pad_idx, reduce=True, size_average=True)
+
             for perm_index, src_index in enumerate(perm_indices):
-                word_idx = w_t[perm_index].data[0]
+                word_idx = w_t[perm_index].data.item()
                 if not ended[perm_index]:
                     outputs[src_index]['word_indices'].append(int(word_idx))
                     outputs[src_index]['score'] = float(sequence_scores[perm_index])
@@ -199,13 +207,61 @@ class Seq2SeqSpeaker(object):
         for item in outputs:
             item['words'] = self.env.tokenizer.decode_sentence(item['word_indices'], break_on_eos=True, join=False)
 
+
+        # import pdb; pdb.set_trace()
+
         return outputs, loss
+
+
+    def batch_objects_by_word(self, paths_obs, instr_seq, max_length):
+        # returns a quantity of objects that should be in every word.
+        # output is (words_qty, num_instructions, max_length)
+
+        words_quantity = 2
+
+        num_instructions = len(paths_obs)
+        seq_tensor = np.full((words_quantity, num_instructions, max_length), vocab_pad_idx)
+        seq_lengths = []
+
+        for i, path_obs in enumerate(paths_obs):
+            path, instr_index = path_obs[0]['instr_id'].split('_')
+            path, instr_index = int(path), int(instr_index)
+
+            instruction_metadata = self.env.objects_by_words[path][instr_index]
+            objects_by_word = instruction_metadata['words_objects']
+            # print(instruction_metadata['instruction'], len(objects_by_word))
+
+            for object_word_index in range(words_quantity):
+                target_objects = []
+                for word_index, word_objects in enumerate(objects_by_word):
+                    if word_index >= max_length:
+                        break
+                    if object_word_index < len(word_objects):
+                        object_name = word_objects[object_word_index]['name']
+                        # Tokenize before appending
+                        object_encode = self.env.tokenizer.encode_sentence(object_name)[0][0]
+
+                        if object_encode == 1:
+                            import pdb; pdb.set_trace()
+
+                        target_objects.append(object_encode)
+                    else:
+                        target_objects.append(instr_seq[i][word_index])
+
+                target_objects = np.concatenate((target_objects, [vocab_eos_idx]))
+                target_objects = target_objects[:max_length]
+                seq_tensor[object_word_index, i, :len(target_objects)] = target_objects
+
+        seq_tensor = torch.from_numpy(seq_tensor)
+
+        return try_cuda(Variable(seq_tensor, requires_grad=False).long())
+
 
     def rollout(self, load_next_minibatch=True):
         path_obs, path_actions, encoded_instructions = self.env.gold_obs_actions_and_instructions(self.max_episode_len, load_next_minibatch=load_next_minibatch)
         outputs, loss = self._score_obs_actions_and_instructions(path_obs, path_actions, encoded_instructions, self.feedback)
         self.loss = loss
-        self.losses.append(loss.data[0])
+        self.losses.append(loss.data.item())
         return outputs
 
     def beam_search(self, beam_size, path_obs, path_actions):

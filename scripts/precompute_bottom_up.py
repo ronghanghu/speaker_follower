@@ -60,7 +60,7 @@ from timer import Timer
 VIEWPOINT_SIZE = 36 # Number of discretized views from one viewpoint
 
 # Settings for the number of features per image. To re-create pretrained features with 36 features
-# per image, set both values to 36. 
+# per image, set both values to 36.
 MIN_BOXES = 10 # 36
 MAX_BOXES = 100 # 36
 
@@ -109,8 +109,8 @@ def get_detections_from_im(net, im, image_id, conf_thresh=0.2):
     ############################
 
     #uncomment for visualizations
-    #im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
-    #plt.imshow(im)
+    im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+    plt.imshow(im)
 
     boxes = cls_boxes[keep_boxes]
     objects = np.argmax(cls_prob[keep_boxes][:,1:], axis=1)
@@ -129,18 +129,18 @@ def get_detections_from_im(net, im, image_id, conf_thresh=0.2):
         if attr_conf[i] > attr_thresh:
              cls = attributes[attr[i]+1] + " " + cls
         captions[i] = cls
-        #plt.gca().add_patch(
-        #    plt.Rectangle((bbox[0], bbox[1]),
-        #              bbox[2] - bbox[0],
-        #              bbox[3] - bbox[1], fill=False,
-        #              edgecolor='red', linewidth=2, alpha=0.5)
-        #        )
-        #plt.gca().text(bbox[0], bbox[1] - 2,
-        #        '%s' % (cls),
-        #        bbox=dict(facecolor='blue', alpha=0.5),
-        #        fontsize=10, color='white')
-    #plt.show()
-    #plt.close()
+        plt.gca().add_patch(
+           plt.Rectangle((bbox[0], bbox[1]),
+                     bbox[2] - bbox[0],
+                     bbox[3] - bbox[1], fill=False,
+                     edgecolor='red', linewidth=2, alpha=0.5)
+               )
+        plt.gca().text(bbox[0], bbox[1] - 2,
+               '%s' % (cls),
+               bbox=dict(facecolor='blue', alpha=0.5),
+               fontsize=10, color='white')
+    plt.show()
+    plt.close()
 
     return {
         'image_id': image_id,
@@ -163,7 +163,7 @@ def load_viewpointids():
                 for item in data:
                     if item['included']:
                         viewpointIds.append((scan, item['image_id']))
-    print 'Loaded %d viewpoints' % len(viewpointIds)
+    print('Loaded %d viewpoints' % len(viewpointIds))
     return viewpointIds
 
 
@@ -188,7 +188,7 @@ def build_tsv(gpu_id, ids):
     # Set up Caffe resnet
     caffe.set_device(gpu_id)#GPU_ID)
     caffe.set_mode_gpu()
-    net = caffe.Net(PROTO, MODEL, caffe.TEST)    
+    net = caffe.Net(PROTO, MODEL, caffe.TEST)
 
     count = 0
     t_render = Timer()
@@ -206,7 +206,7 @@ def build_tsv(gpu_id, ids):
     for scanId in set(scanId for scanId, _ in viewpointIds):
         scan_path = os.path.join(CONV_FEATURE_DIR, scanId)
         if not os.path.exists(scan_path):
-            os.makedirs(scan_path)                
+            os.makedirs(scan_path)
     for scanId,viewpointId in it:
 
         if scanId not in ids: continue
@@ -214,22 +214,22 @@ def build_tsv(gpu_id, ids):
         if os.path.exists(os.path.join(CONV_FEATURE_DIR, scanId, "%s.p" % viewpointId)): continue
         print('working on: %s-%s', scanId, viewpointId)
 
-        t_render.tic()            
+        t_render.tic()
 
         # Loop all discretized views from this location
         blobs = []
         outputs_all = [None] * VIEWPOINT_SIZE
-        try:            
+        try:
             for ix in range(VIEWPOINT_SIZE):
        	        if ix == 0:
-	            sim.newEpisode(scanId, viewpointId, 0, math.radians(-30))
-	        elif ix % 12 == 0:
-	            sim.makeAction(0, 1.0, 1.0)
-	        else:
-	            sim.makeAction(0, 1.0, 0)
-                state = sim.getState()
-                assert state.viewIndex == ix
-                blobs.append(state.rgb)
+	                sim.newEpisode(scanId, viewpointId, 0, math.radians(-30))
+                elif ix % 12 == 0:
+                    sim.makeAction(0, 1.0, 1.0)
+                else:
+                    sim.makeAction(0, 1.0, 0)
+                    state = sim.getState()
+                    assert state.viewIndex == ix
+                    blobs.append(state.rgb)
         except:
             print('dropping: %s-%s', scanId, viewpointId)
             continue
@@ -239,7 +239,7 @@ def build_tsv(gpu_id, ids):
         # Run as many forward passes as necessary
         forward_passes = VIEWPOINT_SIZE
         ix = 0
-        for f in range(forward_passes):             
+        for f in range(forward_passes):
             # Forward pass
             output = get_detections_from_im(net, blobs[ix], ix)
             ix += 1
@@ -249,9 +249,9 @@ def build_tsv(gpu_id, ids):
         count += 1
         t_net.toc()
         if count % 100 == 0:
-            print 'Processed %d / %d viewpoints, %.1fs avg render time, %.1fs avg net time, projected %.1f hours' %\
+            print('Processed %d / %d viewpoints, %.1fs avg render time, %.1fs avg net time, projected %.1f hours' %\
               (count,len(viewpointIds), t_render.average_time, t_net.average_time,
-              (t_render.average_time+t_net.average_time)*len(viewpointIds)/3600)
+              (t_render.average_time+t_net.average_time)*len(viewpointIds)/3600))
 
 def parse_args():
     """
@@ -260,7 +260,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Generate bbox output from a Fast R-CNN network')
     parser.add_argument('--gpu', dest='gpu_id', help='GPU id(s) to use',
                         default='0', type=str)
-    
+
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
@@ -268,7 +268,7 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-if __name__ == "__main__":    
+if __name__ == "__main__":
 
     args = parse_args()
 
@@ -288,12 +288,12 @@ if __name__ == "__main__":
     ids = of.read().split('\n')
     if ids[-1] == '':
         ids = ids[0:-1]
-    
-    ids = [ids[i::len(gpus)] for i in range(len(gpus))]    
+
+    ids = [ids[i::len(gpus)] for i in range(len(gpus))]
     procs = []
 
     #import ipdb; ipdb.set_trace()
-    
+
     for i,gpu_id in enumerate(gpus):
         p = Process(target=build_tsv,
                     args=(gpu_id, ids[i]))
@@ -302,6 +302,6 @@ if __name__ == "__main__":
         procs.append(p)
         #build_tsv(gpu_id, ids[i], OUTFILE_i)
     for p in procs:
-        p.join()        
+        p.join()
 
 
